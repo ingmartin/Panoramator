@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "panoramator"
-version = "0.1.0"
-description = "Extensible MVP for building panoramas from video"
+version = "0.1.1"
+description = "Extensible Python package for building panoramas from video"
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "Ingvar Martin" }]
