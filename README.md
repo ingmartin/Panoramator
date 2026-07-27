@@ -1,10 +1,10 @@
 # panoramator
 
-MVP project for building panoramas from video with an extensible architecture.
+Python package for building panoramas from video with an extensible architecture.
 
 ## Status
 
-This project is currently an MVP. The API and configuration may change without backward compatibility guarantees.
+Published on PyPI and installable with pip.
 
 ## License
 
@@ -28,8 +28,14 @@ This repository is published under the MIT license. See `LICENSE`.
 * denser `sampling_step` fallback when a second pass is needed;
 * CLI for execution and diagnostics.
 
-The MVP uses `affine` by default. For many video panorama cases, `partial_affine` is worth trying when you need tighter control over deformation between adjacent frames.
+The default motion model is `affine`. For many video panorama cases, `partial_affine` is worth trying when you need tighter control over deformation between adjacent frames.
 By default, `blur_threshold` is fixed. The `--adaptive-blur-threshold` option enables an adaptive mode where the effective threshold is reduced according to the sharpness distribution of sampled frames from the current video.
+
+## Installation
+
+```bash
+python -m pip install panoramator
+```
 
 ## Using as a Python Package
 
@@ -55,14 +61,6 @@ result = builder.build_from_video(
 
 print(result.metadata)
 ```
-
-If the package is installed with pip, imports work without extra `PYTHONPATH` setup. For local development, install it in editable mode:
-
-```bash
-python -m pip install -e ".[dev]"
-```
-
-For local experiments without installation, you can still run the code with `PYTHONPATH=src`.
 
 ## Development Setup
 
@@ -200,41 +198,35 @@ All parameters can be set through `PanoramaConfig`, a JSON config file, or parti
 ## Quick Start
 
 ```bash
-PYTHONPATH=src python3 -m panoramator build VID_20260709_140742.mp4 output.png
+panoramator build VID_20260709_140742.mp4 output.png
 ```
 
 For videos where the fixed blur threshold is too strict:
 
 ```bash
-PYTHONPATH=src python3 -m panoramator build VID_20260709_140742.mp4 output.png --adaptive-blur-threshold
+panoramator build VID_20260709_140742.mp4 output.png --adaptive-blur-threshold
 ```
 
 If frames are just slightly too soft, keep the adaptive threshold and tune the rescue sharpening instead of lowering the blur threshold too much:
 
 ```bash
-PYTHONPATH=src python3 -m panoramator build VID_20260709_140742.mp4 output.png --adaptive-blur-threshold --blur-rescue-sharpen-strength 0.25 --blur-rescue-sharpen-sigma 1.0
+panoramator build VID_20260709_140742.mp4 output.png --adaptive-blur-threshold --blur-rescue-sharpen-strength 0.25 --blur-rescue-sharpen-sigma 1.0
 ```
 
 If you want a quality-oriented compromise between speed and full-resolution output, reduce only feature resolution and enable windowed frame selection:
 
 ```bash
-PYTHONPATH=src python3 -m panoramator build VID_20260709_140742.mp4 output.png --feature-downscale 0.5 --frame-selection-window-size 3
+panoramator build VID_20260709_140742.mp4 output.png --feature-downscale 0.5 --frame-selection-window-size 3
 ```
 
 If seam lines are visible in the panorama, you can tune feather width and very local seam blur separately:
 
 ```bash
-PYTHONPATH=src python3 -m panoramator build VID_20260709_140742.mp4 output.png --seam-blur-kernel 7 --seam-band-width 9 --feather-blend-kernel 25
+panoramator build VID_20260709_140742.mp4 output.png --seam-blur-kernel 7 --seam-band-width 9 --feather-blend-kernel 25
 ```
 
 If you need a photo-like final frame without any black corners after warping, enable `photo-mode`:
 
 ```bash
-PYTHONPATH=src python3 -m panoramator build VID_20260709_140742.mp4 output.png --photo-mode
-```
-
-If the package is installed:
-
-```bash
-panoramator build VID_20260709_140742.mp4 output.png
+panoramator build VID_20260709_140742.mp4 output.png --photo-mode
 ```

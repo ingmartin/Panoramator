@@ -1,10 +1,10 @@
 # panoramator
 
-MVP-проект для построения панорам из видео с расширяемой архитектурой.
+Python-пакет для построения панорам из видео с расширяемой архитектурой.
 
 ## Статус
 
-Проект находится в стадии MVP. API и конфигурация могут меняться без гарантии обратной совместимости.
+Пакет опубликован на PyPI и доступен для установки через pip.
 
 ## Лицензия
 
@@ -28,8 +28,14 @@ MVP-проект для построения панорам из видео с �
 * fallback на более плотный `sampling_step`, если нужно подобрать более резкие кадры;
 * CLI для запуска и диагностики.
 
-По умолчанию MVP использует `affine`. Для многих видеопанорам стоит отдельно попробовать `partial_affine`, если нужно сильнее ограничить деформации между кадрами.
+По умолчанию используется модель движения `affine`. Для многих видеопанорам стоит отдельно попробовать `partial_affine`, если нужно сильнее ограничить деформации между кадрами.
 По умолчанию `blur_threshold` фиксированный. Опция `--adaptive-blur-threshold` включает адаптивный режим, в котором фактический порог понижается по распределению резкости sampled-кадров текущего видео.
+
+## Установка
+
+```bash
+python -m pip install panoramator
+```
 
 ## Использование как Python-пакета
 
@@ -55,14 +61,6 @@ result = builder.build_from_video(
 
 print(result.metadata)
 ```
-
-Если пакет установлен через pip, то импорт будет работать без дополнительных настроек `PYTHONPATH`. Для локальной разработки можно установить его в editable-режиме:
-
-```bash
-pip install -e .
-```
-
-Без установки пакета для локальных экспериментов можно запускать код с `PYTHONPATH=src`.
 
 ## Установка для разработки
 
@@ -200,41 +198,35 @@ pytest -q
 ## Быстрый запуск
 
 ```bash
-PYTHONPATH=src python3 -m panoramator build VID_20260709_140742.mp4 output.png
+panoramator build VID_20260709_140742.mp4 output.png
 ```
 
 Для видео, где фиксированный порог резкости слишком строгий:
 
 ```bash
-PYTHONPATH=src python3 -m panoramator build VID_20260709_140742.mp4 output.png --adaptive-blur-threshold
+panoramator build VID_20260709_140742.mp4 output.png --adaptive-blur-threshold
 ```
 
 Если кадры лишь немного «мыльные», лучше не опускать порог слишком сильно, а слегка настроить rescue-sharpening:
 
 ```bash
-PYTHONPATH=src python3 -m panoramator build VID_20260709_140742.mp4 output.png --adaptive-blur-threshold --blur-rescue-sharpen-strength 0.25 --blur-rescue-sharpen-sigma 1.0
+panoramator build VID_20260709_140742.mp4 output.png --adaptive-blur-threshold --blur-rescue-sharpen-strength 0.25 --blur-rescue-sharpen-sigma 1.0
 ```
 
 Если нужен практичный компромисс между скоростью и качеством, можно уменьшить только разрешение для признаков и включить оконный выбор самого резкого кадра:
 
 ```bash
-PYTHONPATH=src python3 -m panoramator build VID_20260709_140742.mp4 output.png --feature-downscale 0.5 --frame-selection-window-size 3
+panoramator build VID_20260709_140742.mp4 output.png --feature-downscale 0.5 --frame-selection-window-size 3
 ```
 
 Если на панораме заметны линии склейки, можно отдельно управлять шириной feather-зоны и очень локальным blur вдоль seam:
 
 ```bash
-PYTHONPATH=src python3 -m panoramator build VID_20260709_140742.mp4 output.png --seam-blur-kernel 7 --seam-band-width 9 --feather-blend-kernel 25
+panoramator build VID_20260709_140742.mp4 output.png --seam-blur-kernel 7 --seam-band-width 9 --feather-blend-kernel 25
 ```
 
 Если нужен итоговый кадр без любых чёрных углов после warp, включите `photo-mode`:
 
 ```bash
-PYTHONPATH=src python3 -m panoramator build VID_20260709_140742.mp4 output.png --photo-mode
-```
-
-Если пакет установлен:
-
-```bash
-panoramator build VID_20260709_140742.mp4 output.png
+panoramator build VID_20260709_140742.mp4 output.png --photo-mode
 ```
