@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "panoramator"
+version = "0.1.0"
+description = "Extensible MVP for building panoramas from video"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Ingvar Martin" }]
+requires-python = ">=3.11"
+keywords = ["panorama", "image-stitching", "computer-vision", "opencv", "video"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Multimedia :: Graphics",
+  "Topic :: Scientific/Engineering :: Image Processing",
+]
+dependencies = [
+  "numpy",
+  "opencv-python",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "pytest-cov",
+]
+full = [
+  "pydantic",
+  "rich",
+  "typer",
+]
+
+[project.scripts]
+panoramator = "panoramator.cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/ingmartin/Panoramator"
+Source = "https://github.com/ingmartin/Panoramator"
+Issues = "https://github.com/ingmartin/Panoramator/issues"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
