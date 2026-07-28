@@ -30,6 +30,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "mypy",
   "pytest",
   "pytest-cov",
 ]
@@ -55,3 +56,8 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.mypy]
+files = ["src/panoramator"]
+mypy_path = "src"
+explicit_package_bases = true

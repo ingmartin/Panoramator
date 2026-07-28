@@ -15,6 +15,7 @@ class AverageBlender:
         warped_frames: list[np.ndarray],
         warped_masks: list[np.ndarray],
         frame_sharpnesses: list[float] | None = None,
+        prefer_sharp_source: bool = False,
     ) -> np.ndarray:
         if not warped_frames:
             raise RuntimeError("No warped frames provided to blender")
@@ -23,13 +24,29 @@ class AverageBlender:
         sharpness_mean = 0.0
         if frame_sharpnesses:
             sharpness_mean = float(np.mean(np.asarray(frame_sharpnesses, dtype=np.float64)))
+        best_frame = np.zeros_like(warped_frames[0]) if prefer_sharp_source else None
+        best_score = np.zeros(warped_masks[0].shape, dtype=np.float64) if prefer_sharp_source else None
         for index, (frame, mask) in enumerate(zip(warped_frames, warped_masks, strict=True)):
-            normalized = self._weight_map(mask)
-            normalized *= self._detail_weight(frame, mask)
+            edge_weight = self._weight_map(mask)
+            normalized = edge_weight * self._detail_weight(frame, mask)
             if frame_sharpnesses:
                 normalized *= self._global_sharpness_weight(frame_sharpnesses[index], sharpness_mean)
             acc += frame.astype(np.float64) * normalized[..., None]
             weight += normalized
+            if best_frame is not None and best_score is not None:
+                selection_score = edge_weight
+                if frame_sharpnesses:
+                    selection_score = selection_score * self._global_sharpness_weight(
+                        frame_sharpnesses[index], sharpness_mean
+                    )
+                replace = selection_score > best_score
+                best_frame[replace] = frame[replace]
+                best_score[replace] = selection_score[replace]
+        if best_frame is not None:
+            # A global surface cannot align different scene depths perfectly.  In
+            # those overlap zones a single sharp source is preferable to averaging
+            # two shifted edges into a permanently blurred double contour.
+            return best_frame
         weight = np.maximum(weight, 1.0)
         blended = acc / weight[..., None]
         blended_uint8 = np.clip(blended, 0, 255).astype(np.uint8)
@@ -93,7 +110,7 @@ class AverageBlender:
 
     def _seam_boundary_mask(self, warped_masks: list[np.ndarray], overlap_mask: np.ndarray) -> np.ndarray:
         band_width = max(1, int(self.config.seam_band_width))
-        seam_mask = np.zeros_like(overlap_mask, dtype=np.uint8)
+        seam_mask: np.ndarray = np.zeros_like(overlap_mask, dtype=np.uint8)
         band_kernel = np.ones((band_width, band_width), dtype=np.uint8)
 
         for mask in warped_masks:

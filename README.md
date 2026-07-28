@@ -2,6 +2,12 @@
 
 Python package for building panoramas from video with an extensible architecture.
 
+Capture modes are independent from projection: `--capture-mode` accepts `auto`, `linear`,
+`rotation`, or `orbit`; `--projection` accepts `auto`, `planar`, `cylindrical`, or
+`spherical`. Ambiguous automatic input preserves the compatible `linear + planar` pipeline.
+Use `--capture-mode rotation` for a camera rotating in place; it selects a cylindrical
+surface. `--focal-length-px` or `--horizontal-fov-degrees` optionally refine the camera model.
+
 ## Status
 
 Published on PyPI and installable with pip.
@@ -22,7 +28,7 @@ This repository is published under the MIT license. See `LICENSE`.
 * global canvas construction;
 * feather blending with additional seam smoothing, photometric normalization, and detail-aware overlap weighting;
 * automatic black border cropping;
-* optional `photo-mode` crop to the fully visible rectangle without internal black wedges;
+* optional `photo-mode` crop of a planar panorama to the fully visible rectangle without internal black wedges;
 * final mild panorama sharpening;
 * `ORB -> SIFT` fallback when the valid frame chain is too short;
 * denser `sampling_step` fallback when a second pass is needed;
@@ -130,7 +136,7 @@ All parameters can be set through `PanoramaConfig`, a JSON config file, or parti
 ### Blending and Seams
 
 * `feather_blend_kernel` - width of the weight smoothing zone near warped frame borders. Default: `21`.
-* `seam_blur_kernel` - strength of local blur along seam areas. Default: `5`.
+* `seam_blur_kernel` - strength of local blur along seam areas. Default: `1` (disabled) to avoid softening details at frame joins.
 * `seam_band_width` - width of the band around seam boundaries where local smoothing is allowed. Default: `7`.
 * `enable_photometric_normalization` - matches brightness and contrast between neighboring selected frames before warping. Default: `True`.
 * `photometric_smoothing` - how strongly neighboring frames are normalized toward each other. Default: `0.65`.
@@ -139,7 +145,7 @@ All parameters can be set through `PanoramaConfig`, a JSON config file, or parti
 ### Postprocessing and Artifacts
 
 * `crop_result` - enables automatic cropping of black borders after stitching. Default: `True`.
-* `photo_mode` - crops more aggressively to the largest rectangle fully inside the visible panorama area. Useful when you want to exclude all black corners and wedges. Default: `False`.
+* `photo_mode` - crops a planar panorama more aggressively to the largest rectangle fully inside the visible area. Cylindrical and spherical panoramas safely fall back to outer-boundary cropping because a strict rectangle can discard most of the result. Default: `False`.
 * `enable_final_sharpening` - applies a final mild unsharp-mask pass to the completed panorama. Default: `True`.
 * `final_sharpen_strength` - strength of the final panorama sharpening pass. Default: `0.15`.
 * `final_sharpen_sigma` - Gaussian sigma used by the final panorama sharpening pass. Default: `1.0`.
@@ -181,7 +187,7 @@ All parameters can be set through `PanoramaConfig`, a JSON config file, or parti
   "max_canvas_width": 12000,
   "max_canvas_height": 12000,
   "feather_blend_kernel": 21,
-  "seam_blur_kernel": 5,
+  "seam_blur_kernel": 1,
   "seam_band_width": 7,
   "enable_photometric_normalization": true,
   "photometric_smoothing": 0.65,
@@ -225,7 +231,7 @@ If seam lines are visible in the panorama, you can tune feather width and very l
 panoramator build VID_20260709_140742.mp4 output.png --seam-blur-kernel 7 --seam-band-width 9 --feather-blend-kernel 25
 ```
 
-If you need a photo-like final frame without any black corners after warping, enable `photo-mode`:
+If you need a photo-like planar frame without any black corners after warping, enable `photo-mode`:
 
 ```bash
 panoramator build VID_20260709_140742.mp4 output.png --photo-mode

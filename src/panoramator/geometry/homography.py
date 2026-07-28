@@ -22,11 +22,11 @@ class HomographyEstimator:
         if len(matches.good_matches) < self.config.min_match_count:
             return PairGeometry(None, 0, float("inf"), False, "not_enough_matches")
 
-        src_points = np.float32(
-            [left_features.keypoints[m.queryIdx].pt for m in matches.good_matches]
+        src_points = np.asarray(
+            [left_features.keypoints[m.queryIdx].pt for m in matches.good_matches], dtype=np.float32
         ).reshape(-1, 1, 2)
-        dst_points = np.float32(
-            [right_features.keypoints[m.trainIdx].pt for m in matches.good_matches]
+        dst_points = np.asarray(
+            [right_features.keypoints[m.trainIdx].pt for m in matches.good_matches], dtype=np.float32
         ).reshape(-1, 1, 2)
 
         homography, mask, reason = self._estimate_transform(dst_points, src_points)
@@ -116,7 +116,7 @@ class HomographyEstimator:
 
     def _has_reasonable_projected_size(self, homography: np.ndarray, source_shape: tuple[int, int]) -> bool:
         height, width = source_shape
-        corners = np.float32([[0, 0], [width, 0], [width, height], [0, height]]).reshape(-1, 1, 2)
+        corners = np.asarray([[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float32).reshape(-1, 1, 2)
         projected = cv2.perspectiveTransform(corners, homography).reshape(-1, 2)
         if not np.isfinite(projected).all():
             return False

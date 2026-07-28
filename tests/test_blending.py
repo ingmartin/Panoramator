@@ -60,3 +60,15 @@ def test_blender_can_bias_overlap_toward_sharper_frame() -> None:
     blended = blender.blend([sharp, soft], [left_mask, right_mask], [400.0, 100.0])
 
     assert blended[12, 10, 0] > blended[12, 14, 0]
+
+
+def test_blender_can_keep_a_single_sharp_source_in_overlap() -> None:
+    config = PanoramaConfig(feather_blend_kernel=1, seam_blur_kernel=1, overlap_sharpness_weight=1.0)
+    blender = AverageBlender(config)
+    first = np.full((8, 8, 3), 40, dtype=np.uint8)
+    second = np.full((8, 8, 3), 200, dtype=np.uint8)
+    mask = np.full((8, 8), 255, dtype=np.uint8)
+
+    blended = blender.blend([first, second], [mask, mask], [100.0, 200.0], prefer_sharp_source=True)
+
+    assert np.all(blended == 200)

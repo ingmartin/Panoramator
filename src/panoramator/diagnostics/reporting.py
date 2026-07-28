@@ -33,6 +33,11 @@ def write_diagnostics(
         "attempted_backends": diagnostics.attempted_backends,
         "attempted_sampling_steps": diagnostics.attempted_sampling_steps,
         "output_files": diagnostics.output_files,
+        "capture_mode": diagnostics.capture_mode,
+        "projection": diagnostics.projection,
+        "strategy_confidence": diagnostics.strategy_confidence,
+        "strategy_reason": diagnostics.strategy_reason,
+        "strategy_measurements": diagnostics.strategy_measurements,
     }
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     return [str(config_path), str(report_path)]

@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from panoramator.projection.models import Projection
 
 ImageArray = np.ndarray
 
@@ -69,6 +73,7 @@ class CanvasModel:
     height: int
     offset_matrix: ImageArray
     global_homographies: list[ImageArray]
+    projection: Projection | None = None
 
 
 @dataclass(slots=True)
@@ -84,6 +89,11 @@ class PanoramaDiagnostics:
     attempted_backends: list[str] = field(default_factory=list)
     attempted_sampling_steps: list[int] = field(default_factory=list)
     output_files: list[str] = field(default_factory=list)
+    capture_mode: str = "linear"
+    projection: str = "planar"
+    strategy_confidence: float = 0.0
+    strategy_reason: str = ""
+    strategy_measurements: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

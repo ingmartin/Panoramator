@@ -11,7 +11,7 @@ class ORBFeatureExtractor:
     backend_name = "orb"
 
     def __init__(self, config: PanoramaConfig) -> None:
-        self.extractor = cv2.ORB_create(nfeatures=config.max_features)
+        self.extractor = cv2.ORB_create(nfeatures=config.max_features)  # type: ignore[attr-defined]
 
     def extract(self, frame: Frame) -> FeatureSet:
         image = frame.feature_image if frame.feature_image is not None else frame.image

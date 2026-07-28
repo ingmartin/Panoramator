@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 
 from panoramator.blending.overlay import AverageBlender
+from panoramator.camera.models import CameraParameters
 from panoramator.canvas.builder import PanoramaCanvasBuilder
 from panoramator.config.models import PanoramaConfig
 from panoramator.diagnostics.reporting import write_diagnostics
@@ -28,12 +29,16 @@ from panoramator.geometry.homography import (
 )
 from panoramator.io.video import OpenCVVideoSource
 from panoramator.matching.matchers import BFMatcherAdapter
+from panoramator.motion_analysis.analyzer import MotionAnalyzer
 from panoramator.postprocess.crop import crop_black_borders, crop_to_visible_area
 from panoramator.postprocess.enhance import (
     apply_final_sharpening,
     normalize_selected_frames,
 )
+from panoramator.projection.models import Projection, create_projection
+from panoramator.projection.preprocess import project_frame_for_geometry
 from panoramator.selection.selector import FrameSelector
+from panoramator.strategy.resolver import resolve_strategy
 from panoramator.warping.warper import FrameWarper
 
 LOGGER = logging.getLogger(__name__)
@@ -61,6 +66,7 @@ class PanoramaBuilder:
         self.canvas_builder = PanoramaCanvasBuilder(self.config)
         self.warper = FrameWarper()
         self.blender = AverageBlender(self.config)
+        self.motion_analyzer = MotionAnalyzer()
 
     def build_from_video(self, video_path: str | Path, output_path: str | Path) -> PanoramaResult:
         metadata = self._read_metadata(video_path)
@@ -73,7 +79,15 @@ class PanoramaBuilder:
         normalized_frames = normalize_selected_frames(chain_result.filtered_frames, self.config)
         global_homographies = accumulate_global_homographies(chain_result.pairwise_homographies)
         frame_shapes = [item.frame.image.shape[:2] for item in normalized_frames]
-        canvas = self.canvas_builder.build(frame_shapes, global_homographies)
+        analysis = self.motion_analyzer.analyze(chain_result.pairwise_homographies, chain_result.pair_metrics)
+        decision = resolve_strategy(self.config, analysis)
+        camera = CameraParameters.from_config(self.config, frame_shapes[0])
+        projection = create_projection(decision.projection, camera)
+        if decision.projection == "planar":
+            # Keep the established call contract and byte-for-byte planar path intact.
+            canvas = self.canvas_builder.build(frame_shapes, global_homographies)
+        else:
+            canvas = self.canvas_builder.build(frame_shapes, global_homographies, projection)
 
         warped_frames = []
         warped_masks = []
@@ -84,10 +98,18 @@ class PanoramaBuilder:
             warped_masks.append(mask)
             frame_sharpnesses.append(selected.quality.sharpness)
 
-        panorama = self.blender.blend(warped_frames, warped_masks, frame_sharpnesses)
+        if decision.projection == "planar":
+            panorama = self.blender.blend(warped_frames, warped_masks, frame_sharpnesses)
+        else:
+            panorama = self.blender.blend(
+                warped_frames,
+                warped_masks,
+                frame_sharpnesses,
+                prefer_sharp_source=True,
+            )
         visible_mask = self._combined_visible_mask(warped_masks)
         if self.config.crop_result:
-            if self.config.photo_mode:
+            if self.config.photo_mode and decision.projection == "planar":
                 panorama = crop_to_visible_area(panorama, visible_mask)
             else:
                 panorama = crop_black_borders(panorama, visible_mask)
@@ -132,6 +154,11 @@ class PanoramaBuilder:
             attempted_backends=chain_result.attempted_backends,
             attempted_sampling_steps=chain_result.attempted_sampling_steps,
             output_files=[str(output)],
+            capture_mode=decision.capture_mode,
+            projection=decision.projection,
+            strategy_confidence=decision.confidence,
+            strategy_reason=decision.reason,
+            strategy_measurements=decision.measurements,
         )
         if self.config.save_debug_artifacts:
             effective_config = replace(
@@ -208,10 +235,15 @@ class PanoramaBuilder:
     ) -> _ChainBuildResult:
         backend_config = replace(config, feature_backend=backend)
         extractor = create_feature_extractor(backend_config)
-        features = [extractor.extract(item.frame) for item in selected_frames]
+        geometry_projection = self._geometry_projection(config, selected_frames[0].frame)
+        projected_frames = {
+            id(item.frame): project_frame_for_geometry(item.frame, geometry_projection)
+            for item in selected_frames
+        }
+        features = [extractor.extract(projected_frames[id(item.frame)]) for item in selected_frames]
 
-        pairwise_homographies = []
-        pair_metrics = []
+        pairwise_homographies: list[np.ndarray] = []
+        pair_metrics: list[dict[str, object]] = []
         filtered_frames = [selected_frames[0]]
         filtered_features = [features[0]]
         feature_cache: dict[int, FeatureSet] = {
@@ -229,17 +261,20 @@ class PanoramaBuilder:
                 feature_cache,
                 backend,
                 pair_metrics,
+                geometry_projection,
             )
             if chosen_geometry is None or chosen_features is None or chosen_selected is None:
                 continue
+            homography = chosen_geometry.homography
+            assert homography is not None
             if not self._fits_canvas(
                 [*filtered_frames, chosen_selected],
-                [*pairwise_homographies, chosen_geometry.homography],
+                [*pairwise_homographies, homography],
             ):
                 pair_metrics[-1]["valid"] = False
                 pair_metrics[-1]["reason"] = "canvas_limit"
                 continue
-            pairwise_homographies.append(chosen_geometry.homography)
+            pairwise_homographies.append(homography)
             filtered_frames.append(chosen_selected)
             filtered_features.append(chosen_features)
 
@@ -264,6 +299,7 @@ class PanoramaBuilder:
         feature_cache: dict[int, FeatureSet],
         backend: str,
         pair_metrics: list[dict[str, object]],
+        geometry_projection: Projection,
     ) -> tuple[SelectedFrame | None, FeatureSet | None, PairGeometry | None]:
         candidates = [selected_frame.frame, *selected_frame.alternates]
         fallback_used = False
@@ -271,7 +307,7 @@ class PanoramaBuilder:
         for candidate_frame in candidates:
             candidate_features = feature_cache.get(id(candidate_frame))
             if candidate_features is None:
-                candidate_features = extractor.extract(candidate_frame)
+                candidate_features = extractor.extract(project_frame_for_geometry(candidate_frame, geometry_projection))
                 feature_cache[id(candidate_frame)] = candidate_features
 
             matches = self.matcher.match(left_features, candidate_features)
@@ -315,6 +351,21 @@ class PanoramaBuilder:
             )
 
         return None, None, None
+
+    def _geometry_projection(self, config: PanoramaConfig, frame: Frame) -> Projection:
+        """Choose the coordinate system used for matching and motion estimation.
+
+        A manual curved projection is an explicit request to estimate geometry on
+        that surface.  Automatic mode intentionally retains its established planar
+        chain: its decision is made only after a chain has been analysed.
+        """
+        if config.projection in {"cylindrical", "spherical"}:
+            name = config.projection
+        elif config.capture_mode == "rotation":
+            name = "cylindrical"
+        else:
+            name = "planar"
+        return create_projection(name, CameraParameters.from_config(config, frame.image.shape[:2]))
 
     def _should_try_fallback(self, result: _ChainBuildResult) -> bool:
         if not self.config.enable_feature_fallback:
@@ -365,7 +416,7 @@ class PanoramaBuilder:
     def _combined_visible_mask(warped_masks: list[np.ndarray]) -> np.ndarray | None:
         if not warped_masks:
             return None
-        visible_mask = np.zeros_like(warped_masks[0], dtype=np.uint8)
+        visible_mask: np.ndarray = np.zeros_like(warped_masks[0], dtype=np.uint8)
         for mask in warped_masks:
             visible_mask = cv2.bitwise_or(visible_mask, (mask > 0).astype(np.uint8) * 255)
         return visible_mask

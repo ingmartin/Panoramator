@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
+from math import isfinite
 from pathlib import Path
 
 
@@ -31,6 +32,13 @@ class PanoramaConfig:
     min_inlier_count: int = 8
     min_inlier_ratio: float = 0.4
     motion_model: str = "affine"
+    capture_mode: str = "auto"
+    projection: str = "auto"
+    focal_length_px: float | None = None
+    horizontal_fov_degrees: float | None = None
+    projection_center_x: float | None = None
+    projection_center_y: float | None = None
+    projection_contour_samples: int = 32
     ransac_threshold: float = 4.0
     max_reprojection_error: float = 6.0
     max_scale_deviation: float = 0.15
@@ -39,7 +47,7 @@ class PanoramaConfig:
     max_canvas_width: int = 12000
     max_canvas_height: int = 12000
     feather_blend_kernel: int = 21
-    seam_blur_kernel: int = 5
+    seam_blur_kernel: int = 1
     seam_band_width: int = 7
     enable_photometric_normalization: bool = True
     photometric_smoothing: float = 0.65
@@ -69,6 +77,8 @@ class PanoramaConfig:
         self.feature_backend = self.feature_backend.lower()
         self.fallback_feature_backend = self.fallback_feature_backend.lower()
         self.motion_model = self.motion_model.lower()
+        self.capture_mode = self.capture_mode.lower()
+        self.projection = self.projection.lower()
         if self.sampling_step < 1:
             raise ValueError("sampling_step must be >= 1")
         if self.max_frames < 1:
@@ -109,6 +119,26 @@ class PanoramaConfig:
             raise ValueError("min_inlier_ratio must be between 0.0 (exclusive) and 1.0")
         if self.motion_model not in {"translation", "partial_affine", "affine", "homography"}:
             raise ValueError("motion_model must be one of: translation, partial_affine, affine, homography")
+        if self.capture_mode not in {"auto", "linear", "rotation", "orbit"}:
+            raise ValueError("capture_mode must be one of: auto, linear, rotation, orbit")
+        if self.projection not in {"auto", "planar", "cylindrical", "spherical"}:
+            raise ValueError("projection must be one of: auto, planar, cylindrical, spherical")
+        if self.focal_length_px is not None and (not isfinite(self.focal_length_px) or self.focal_length_px <= 0):
+            raise ValueError("focal_length_px must be > 0")
+        if self.horizontal_fov_degrees is not None and (
+            not isfinite(self.horizontal_fov_degrees) or not 1.0 < self.horizontal_fov_degrees < 179.0
+        ):
+            raise ValueError("horizontal_fov_degrees must be between 1 and 179")
+        if self.focal_length_px is not None and self.horizontal_fov_degrees is not None:
+            raise ValueError("Set either focal_length_px or horizontal_fov_degrees, not both")
+        if self.projection_contour_samples < 4:
+            raise ValueError("projection_contour_samples must be >= 4")
+        for name, value in {
+            "projection_center_x": self.projection_center_x,
+            "projection_center_y": self.projection_center_y,
+        }.items():
+            if value is not None and not isfinite(value):
+                raise ValueError(f"{name} must be finite")
         if self.ransac_threshold <= 0:
             raise ValueError("ransac_threshold must be > 0")
         if self.max_reprojection_error <= 0:

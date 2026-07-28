@@ -8,7 +8,15 @@ import pytest
 
 from panoramator.application.use_cases import PanoramaBuilder, _ChainBuildResult
 from panoramator.config.models import PanoramaConfig
-from panoramator.domain.models import FeatureSet, Frame, FrameQuality, MatchSet, PairGeometry, SelectedFrame, VideoMetadata
+from panoramator.domain.models import (
+    FeatureSet,
+    Frame,
+    FrameQuality,
+    MatchSet,
+    PairGeometry,
+    SelectedFrame,
+    VideoMetadata,
+)
 
 
 def _selected_frame(index: int) -> SelectedFrame:

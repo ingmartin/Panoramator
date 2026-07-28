@@ -38,6 +38,14 @@ def build_command(args: argparse.Namespace) -> int:
         config.frame_selection_window_size = args.frame_selection_window_size
     if args.motion_model is not None:
         config.motion_model = args.motion_model
+    if getattr(args, "capture_mode", None) is not None:
+        config.capture_mode = args.capture_mode
+    if getattr(args, "projection", None) is not None:
+        config.projection = args.projection
+    if getattr(args, "focal_length_px", None) is not None:
+        config.focal_length_px = args.focal_length_px
+    if getattr(args, "horizontal_fov_degrees", None) is not None:
+        config.horizontal_fov_degrees = args.horizontal_fov_degrees
     if args.feather_blend_kernel is not None:
         config.feather_blend_kernel = args.feather_blend_kernel
     if args.seam_blur_kernel is not None:
@@ -86,6 +94,8 @@ def build_command(args: argparse.Namespace) -> int:
     print(f"Feature backend: {result.diagnostics.feature_backend}")
     print(f"Sampling step: {result.diagnostics.sampling_step}")
     print(f"Fallback used: {result.diagnostics.fallback_used}")
+    print(f"Capture mode: {result.diagnostics.capture_mode}")
+    print(f"Projection: {result.diagnostics.projection}")
     print(f"Video FPS: {result.metadata.fps}")
     return 0
 
@@ -131,6 +141,10 @@ def create_parser() -> argparse.ArgumentParser:
     build.add_argument("--blur-rescue-sharpen-sigma", type=float)
     build.add_argument("--frame-selection-window-size", type=int)
     build.add_argument("--motion-model", choices=["translation", "partial_affine", "affine", "homography"])
+    build.add_argument("--capture-mode", choices=["auto", "linear", "rotation", "orbit"])
+    build.add_argument("--projection", choices=["auto", "planar", "cylindrical", "spherical"])
+    build.add_argument("--focal-length-px", type=float)
+    build.add_argument("--horizontal-fov-degrees", type=float)
     build.add_argument("--feather-blend-kernel", type=int)
     build.add_argument("--seam-blur-kernel", type=int)
     build.add_argument("--seam-band-width", type=int)
