@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
+from itertools import pairwise
 from pathlib import Path
 
 import cv2
@@ -82,7 +83,6 @@ class PanoramaBuilder:
         keyframe_metrics: list[dict[str, float | str]] = []
         if decision.capture_mode == "rotation":
             chain_result, keyframe_metrics = self._decimate_rotation_chain(chain_result)
-            analysis = self.motion_analyzer.analyze(chain_result.pairwise_homographies, chain_result.pair_metrics)
         normalized_frames = normalize_selected_frames(chain_result.filtered_frames, self.config)
         frame_shapes = [item.frame.image.shape[:2] for item in normalized_frames]
         orbit_status = self._orbit_status(decision.capture_mode, analysis)
@@ -152,6 +152,7 @@ class PanoramaBuilder:
                 crop_policy,
                 max_inscribed_loss=self.config.max_inscribed_crop_loss,
                 max_inscribed_width_loss=self.config.max_inscribed_crop_width_loss,
+                force_inscribed=self.config.photo_mode,
             )
         panorama = apply_final_sharpening(panorama, self.config)
 
@@ -319,6 +320,7 @@ class PanoramaBuilder:
             if not self._fits_canvas(
                 [*filtered_frames, chosen_selected],
                 [*pairwise_homographies, homography],
+                geometry_projection,
             ):
                 pair_metrics[-1]["valid"] = False
                 pair_metrics[-1]["reason"] = "canvas_limit"
@@ -451,12 +453,15 @@ class PanoramaBuilder:
         return metadata
 
     def _fits_canvas(
-        self, selected_frames: list[SelectedFrame], pairwise_homographies: list[np.ndarray]
+        self,
+        selected_frames: list[SelectedFrame],
+        pairwise_homographies: list[np.ndarray],
+        projection: Projection | None = None,
     ) -> bool:
         global_homographies = accumulate_global_homographies(pairwise_homographies)
         frame_shapes = [item.frame.image.shape[:2] for item in selected_frames]
         try:
-            self.canvas_builder.build(frame_shapes, global_homographies)
+            self.canvas_builder.build(frame_shapes, global_homographies, projection)
         except RuntimeError:
             return False
         return True
@@ -489,14 +494,14 @@ class PanoramaBuilder:
         if len(keep) == len(chain.filtered_frames):
             return chain, metrics
         kept_globals = [global_homographies[index] for index in keep]
-        pairwise = [
-            np.linalg.inv(left) @ right for left, right in zip(kept_globals, kept_globals[1:])
+        decimated_pairs = [
+            np.linalg.inv(left) @ right for left, right in pairwise(kept_globals)
         ]
         return (
             replace(
                 chain,
                 filtered_frames=[chain.filtered_frames[index] for index in keep],
-                pairwise_homographies=pairwise,
+                pairwise_homographies=decimated_pairs,
             ),
             metrics,
         )
@@ -504,7 +509,7 @@ class PanoramaBuilder:
     def _resolve_crop_policy(self, projection: str) -> str:
         if self.config.crop_policy != "auto":
             return self.config.crop_policy
-        if self.config.photo_mode and projection == "planar":
+        if self.config.photo_mode:
             return "inscribed_rectangle"
         return "bounding"
 

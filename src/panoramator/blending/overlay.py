@@ -68,6 +68,11 @@ class AverageBlender:
                 self.last_seam_metrics.append(
                     {"frame_index": float(index), "new_coverage_ratio": new_coverage_ratio, "decision": -1.0}
                 )
+                # Do not turn a deliberately seam-free sliver into a black hole.
+                # The existing owner remains in the overlap; only genuinely new
+                # pixels extend the visible mask.
+                result[only_incoming] = incoming[only_incoming]
+                coverage |= incoming_mask
                 continue
             if np.any(overlap):
                 incoming, metric = self._photometrically_align(result, incoming, overlap, index)
@@ -169,7 +174,7 @@ class AverageBlender:
         seam[-1] = end_x
         for row in range(len(seam) - 1, 0, -1):
             seam[row - 1] = parents[row, seam[row]]
-        unique_y, unique_x = np.where(only_incoming)
+        _, unique_x = np.where(only_incoming)
         incoming_on_right = float(np.mean(unique_x)) >= (x0 + x1) / 2.0
         selected = np.zeros_like(overlap)
         for row, seam_x in enumerate(seam, start=y0):

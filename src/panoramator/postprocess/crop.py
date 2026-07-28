@@ -11,6 +11,7 @@ def crop_with_policy(
     *,
     max_inscribed_loss: float,
     max_inscribed_width_loss: float,
+    force_inscribed: bool = False,
 ) -> tuple[np.ndarray, str, float]:
     """Apply a projection-aware crop policy and report any safety fallback."""
     if policy == "preserve_alpha":
@@ -30,7 +31,7 @@ def crop_with_policy(
     bounding_area = max(1, bounding.shape[0] * bounding.shape[1])
     loss = 1.0 - (inscribed.shape[0] * inscribed.shape[1] / bounding_area)
     width_loss = 1.0 - (inscribed.shape[1] / max(1, bounding.shape[1]))
-    if loss > max_inscribed_loss or width_loss > max_inscribed_width_loss:
+    if not force_inscribed and (loss > max_inscribed_loss or width_loss > max_inscribed_width_loss):
         return bounding, "bounding_fallback_excessive_inscribed_loss", loss
     return inscribed, "inscribed_rectangle", loss
 

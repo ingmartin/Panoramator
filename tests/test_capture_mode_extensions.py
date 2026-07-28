@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from panoramator.blending.overlay import AverageBlender
 from panoramator.application.use_cases import PanoramaBuilder, _ChainBuildResult
+from panoramator.blending.overlay import AverageBlender
 from panoramator.config.models import PanoramaConfig
 from panoramator.domain.models import Frame, FrameQuality, SelectedFrame
 from panoramator.geometry.trajectory import stabilize_rotation_trajectory
 from panoramator.postprocess.crop import crop_with_policy
+from panoramator.projection.models import CylindricalProjection
 
 
 def test_curved_auto_crop_uses_bounding_policy() -> None:
@@ -23,6 +24,31 @@ def test_curved_auto_crop_uses_bounding_policy() -> None:
     assert policy == "bounding_fallback_excessive_inscribed_loss"
     assert cropped.shape[:2] == (8, 18)
     assert loss > 0.1
+
+
+def test_forced_inscribed_crop_does_not_fall_back_to_bounding() -> None:
+    image = np.full((10, 20, 3), 200, dtype=np.uint8)
+    mask = np.zeros((10, 20), dtype=np.uint8)
+    mask[1:9, 1:19] = 255
+    mask[1:4, 1:5] = 0
+
+    cropped, policy, _ = crop_with_policy(
+        image,
+        mask,
+        "inscribed_rectangle",
+        max_inscribed_loss=0.0,
+        max_inscribed_width_loss=0.0,
+        force_inscribed=True,
+    )
+
+    assert policy == "inscribed_rectangle"
+    assert np.all(cropped > 0)
+
+
+def test_photo_mode_uses_inscribed_crop_for_cylindrical_panorama() -> None:
+    builder = PanoramaBuilder(PanoramaConfig(photo_mode=True))
+
+    assert builder._resolve_crop_policy("cylindrical") == "inscribed_rectangle"
 
 
 def test_preserve_alpha_crop_keeps_visible_mask() -> None:
@@ -100,6 +126,38 @@ def test_rotation_blender_skips_frame_with_negligible_new_coverage() -> None:
 
     assert np.all(result == 20)
     assert blender.last_seam_metrics[0]["decision"] == -1.0
+
+
+def test_rotation_blender_keeps_new_pixels_when_skipping_a_seam() -> None:
+    blender = AverageBlender(PanoramaConfig(rotation_min_new_coverage_ratio=0.2, feather_blend_kernel=1))
+    first = np.full((10, 10, 3), 20, dtype=np.uint8)
+    second = np.full((10, 10, 3), 200, dtype=np.uint8)
+    first_mask = np.zeros((10, 10), dtype=np.uint8)
+    first_mask[:, :9] = 255
+    second_mask = np.full((10, 10), 255, dtype=np.uint8)
+
+    result = blender.blend([first, second], [first_mask, second_mask], prefer_sharp_source=True)
+
+    assert np.all(result[:, -1] == 200)
+    assert blender.last_seam_metrics[0]["decision"] == -1.0
+
+
+def test_rotation_canvas_limit_uses_curved_projection(monkeypatch) -> None:
+    builder = PanoramaBuilder(PanoramaConfig(capture_mode="rotation", enable_feature_fallback=False))
+    selected = [
+        SelectedFrame(Frame(index, 0.0, np.zeros((8, 8, 3), dtype=np.uint8)), FrameQuality(1.0, 1.0, True, "ok"))
+        for index in range(2)
+    ]
+    captured: dict[str, object] = {}
+
+    def fake_build(frame_shapes, homographies, projection=None):
+        captured["projection"] = projection
+        return object()
+
+    monkeypatch.setattr(builder.canvas_builder, "build", fake_build)
+
+    assert builder._fits_canvas(selected, [np.eye(3)], CylindricalProjection) is True
+    assert captured["projection"] is CylindricalProjection
 
 
 def test_rotation_blender_reduces_overlap_colour_error() -> None:
