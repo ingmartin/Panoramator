@@ -11,6 +11,7 @@ class AverageBlender:
         self.config = config
         self.last_seam_metrics: list[dict[str, float]] = []
         self.last_photometric_metrics: list[dict[str, float]] = []
+        self.last_global_photometric_metrics: list[dict[str, float]] = []
 
     def blend(
         self,
@@ -23,6 +24,7 @@ class AverageBlender:
             raise RuntimeError("No warped frames provided to blender")
         self.last_seam_metrics = []
         self.last_photometric_metrics = []
+        self.last_global_photometric_metrics = []
         if prefer_sharp_source:
             return self._blend_with_seams(warped_frames, warped_masks, frame_sharpnesses)
         acc = np.zeros_like(warped_frames[0], dtype=np.float64)
@@ -50,6 +52,8 @@ class AverageBlender:
         details; for the usual horizontal panorama the seam is a top-to-bottom
         path.  Non-overlapping pixels are copied unchanged.
         """
+        if self.config.enable_global_photometric_normalization:
+            frames, self.last_global_photometric_metrics = self._globally_align_frames(frames, masks)
         result = frames[0].copy()
         coverage = masks[0] > 0
         current_sharpness = sharpnesses[0] if sharpnesses else 1.0
@@ -74,7 +78,7 @@ class AverageBlender:
                 result[only_incoming] = incoming[only_incoming]
                 coverage |= incoming_mask
                 continue
-            if np.any(overlap):
+            if np.any(overlap) and self.config.enable_photometric_normalization:
                 incoming, metric = self._photometrically_align(result, incoming, overlap, index)
                 self.last_photometric_metrics.append(metric)
             result[only_incoming] = incoming[only_incoming]
@@ -85,7 +89,7 @@ class AverageBlender:
                     if np.array_equal(incoming_mask, coverage) and incoming_sharpness > current_sharpness:
                         result[overlap] = incoming[overlap]
                     continue
-                use_incoming, cost = self._vertical_seam(result, incoming, overlap, only_incoming)
+                use_incoming, cost, orientation = self._find_seam(result, incoming, overlap, only_incoming)
                 result[use_incoming] = incoming[use_incoming]
                 self.last_seam_metrics.append(
                     {
@@ -93,12 +97,69 @@ class AverageBlender:
                         "mean_conflict": cost,
                         "overlap_pixels": float(overlap.sum()),
                         "new_coverage_ratio": new_coverage_ratio,
+                        "orientation": 1.0 if orientation == "vertical" else 0.0,
                         "decision": 1.0,
                     }
                 )
             coverage |= incoming_mask
             current_sharpness = max(current_sharpness, sharpnesses[index] if sharpnesses else 1.0)
         return result
+
+    def _globally_align_frames(
+        self, frames: list[np.ndarray], masks: list[np.ndarray]
+    ) -> tuple[list[np.ndarray], list[dict[str, float]]]:
+        """Solve overlap colour offsets for the entire chain with frame zero fixed.
+
+        Local seam correction remains useful for residual exposure changes, but
+        this anchored least-squares pass prevents its corrections from drifting
+        along a long sequence of frames.
+        """
+        count = len(frames)
+        if count < 2:
+            return frames, []
+        equations: list[tuple[int, int, np.ndarray]] = []
+        for left in range(count - 1):
+            for right in range(left + 1, count):
+                overlap = (masks[left] > 0) & (masks[right] > 0)
+                if int(overlap.sum()) < 64:
+                    continue
+                left_gray = cv2.cvtColor(frames[left], cv2.COLOR_BGR2GRAY)
+                right_gray = cv2.cvtColor(frames[right], cv2.COLOR_BGR2GRAY)
+                calm = overlap & (left_gray > 8) & (left_gray < 247) & (right_gray > 8) & (right_gray < 247)
+                if int(calm.sum()) < 64:
+                    continue
+                difference = np.median(
+                    frames[left][calm].astype(np.float32) - frames[right][calm].astype(np.float32), axis=0
+                )
+                equations.append((left, right, difference))
+        if not equations:
+            return frames, []
+        matrix = np.zeros((len(equations), count - 1), dtype=np.float64)
+        for row, (left, right, _) in enumerate(equations):
+            if left:
+                matrix[row, left - 1] = -1.0
+            if right:
+                matrix[row, right - 1] = 1.0
+        offsets = np.zeros((count, 3), dtype=np.float64)
+        for channel in range(3):
+            target = np.asarray([difference[channel] for _, _, difference in equations], dtype=np.float64)
+            solved, *_ = np.linalg.lstsq(matrix, target, rcond=None)
+            offsets[1:, channel] = np.clip(solved, -self.config.photometric_offset_limit, self.config.photometric_offset_limit)
+        corrected = [
+            np.clip(frame.astype(np.float32) + offsets[index], 0, 255).astype(np.uint8)
+            for index, frame in enumerate(frames)
+        ]
+        metrics = [
+            {
+                "frame_index": float(index),
+                "offset_b": float(offset[0]),
+                "offset_g": float(offset[1]),
+                "offset_r": float(offset[2]),
+                "constraint_count": float(len(equations)),
+            }
+            for index, offset in enumerate(offsets)
+        ]
+        return corrected, metrics
 
     def _photometrically_align(
         self, base: np.ndarray, incoming: np.ndarray, overlap: np.ndarray, index: int
@@ -140,6 +201,31 @@ class AverageBlender:
             "offset_g": float(offset[1]),
             "offset_r": float(offset[2]),
         }
+
+    @classmethod
+    def _find_seam(
+        cls, base: np.ndarray, incoming: np.ndarray, overlap: np.ndarray, only_incoming: np.ndarray
+    ) -> tuple[np.ndarray, float, str]:
+        """Choose seam orientation from the direction in which coverage grows."""
+        overlap_y, overlap_x = np.where(overlap)
+        new_y, new_x = np.where(only_incoming)
+        # For handheld footage the newly visible area is often L-shaped.  Its
+        # centroid tracks the actual camera drift better than its bounding box:
+        # using the latter forces a vertical seam through small vertical shakes
+        # and produces a dense sawtooth pattern on straight lines.
+        horizontal_growth = abs(float(new_x.mean() - overlap_x.mean())) >= abs(float(new_y.mean() - overlap_y.mean()))
+        if horizontal_growth:
+            selected, cost = cls._vertical_seam(base, incoming, overlap, only_incoming)
+            return selected, cost, "vertical"
+        # A left-to-right path is the same dynamic programme in transposed
+        # coordinates and avoids forcing a vertical seam on tilt panoramas.
+        selected, cost = cls._vertical_seam(
+            np.swapaxes(base, 0, 1),
+            np.swapaxes(incoming, 0, 1),
+            overlap.T,
+            only_incoming.T,
+        )
+        return selected.T, cost, "horizontal"
 
     @staticmethod
     def _vertical_seam(

@@ -7,6 +7,7 @@ from panoramator.blending.overlay import AverageBlender
 from panoramator.config.models import PanoramaConfig
 from panoramator.domain.models import Frame, FrameQuality, SelectedFrame
 from panoramator.geometry.trajectory import stabilize_rotation_trajectory
+from panoramator.motion_analysis.analyzer import MotionAnalysis
 from panoramator.postprocess.crop import crop_with_policy
 from panoramator.projection.models import CylindricalProjection
 
@@ -43,6 +44,45 @@ def test_forced_inscribed_crop_does_not_fall_back_to_bounding() -> None:
 
     assert policy == "inscribed_rectangle"
     assert np.all(cropped > 0)
+
+
+def test_inscribed_margin_removes_unreliable_visible_edge() -> None:
+    image = np.full((9, 9, 3), 200, dtype=np.uint8)
+    mask = np.full((9, 9), 255, dtype=np.uint8)
+
+    cropped, policy, _ = crop_with_policy(
+        image,
+        mask,
+        "inscribed_rectangle",
+        max_inscribed_loss=1.0,
+        max_inscribed_width_loss=1.0,
+        force_inscribed=True,
+        inscribed_margin=2,
+    )
+
+    assert policy == "inscribed_rectangle"
+    assert cropped.shape[:2] == (5, 5)
+
+
+def test_oversized_inscribed_margin_does_not_restore_black_borders() -> None:
+    image = np.zeros((7, 7, 3), dtype=np.uint8)
+    image[2:5, 2:5] = 200
+    mask = np.zeros((7, 7), dtype=np.uint8)
+    mask[2:5, 2:5] = 255
+
+    cropped, policy, _ = crop_with_policy(
+        image,
+        mask,
+        "inscribed_rectangle",
+        max_inscribed_loss=1.0,
+        max_inscribed_width_loss=1.0,
+        force_inscribed=True,
+        inscribed_margin=3,
+    )
+
+    assert policy == "inscribed_rectangle"
+    assert cropped.shape[:2] == (3, 3)
+    assert np.all(cropped == 200)
 
 
 def test_photo_mode_uses_inscribed_crop_for_cylindrical_panorama() -> None:
@@ -107,7 +147,39 @@ def test_rotation_chain_is_decimated_by_geometric_baseline() -> None:
 
     assert [item.frame.index for item in decimated.filtered_frames] == [0, 3]
     assert len(decimated.pairwise_homographies) == 1
-    assert metrics[1]["decision"] == "rejected_insufficient_baseline"
+    assert metrics[1]["decision"] == "rejected_insufficient_baseline_or_coverage"
+
+
+def test_auto_cylindrical_preview_reuses_selected_frames_and_requires_a_valid_chain(monkeypatch) -> None:
+    frames = [
+        SelectedFrame(Frame(index, 0.0, np.zeros((8, 8, 3), dtype=np.uint8)), FrameQuality(1.0, 1.0, True, "ok"))
+        for index in range(2)
+    ]
+    chain = _ChainBuildResult("orb", 8, ["orb"], [8], frames, [], frames, [np.eye(3)], [])
+    builder = PanoramaBuilder(PanoramaConfig())
+    captured: dict[str, object] = {}
+
+    def fake_build(selected, rejected, config, sampling_steps):
+        captured["config"] = config
+        captured["selected"] = selected
+        return chain
+
+    monkeypatch.setattr(builder, "_build_chain_with_fallback", fake_build)
+
+    preview = builder._build_cylindrical_preview(chain)
+
+    assert preview is chain
+    assert captured["selected"] is frames
+    config = captured["config"]
+    assert isinstance(config, PanoramaConfig)
+    assert (config.capture_mode, config.projection, config.sampling_step) == ("rotation", "cylindrical", 8)
+
+
+def test_orbit_output_requires_residual_and_dominant_inlier_quality() -> None:
+    builder = PanoramaBuilder(PanoramaConfig(orbit_max_reprojection_error=3.5, orbit_min_dominant_inlier_ratio=0.7))
+
+    assert builder._orbit_status("orbit", MotionAnalysis("orbit", 1.0, "test", {"mean_reprojection_error": 2.0, "mean_inlier_ratio": 0.6})) == "orbit_not_supported_reliably"
+    assert builder._orbit_status("orbit", MotionAnalysis("orbit", 1.0, "test", {"mean_reprojection_error": 2.0, "mean_inlier_ratio": 0.8})) == "orbit_dominant_global_surface"
 
 
 def test_rotation_baseline_default_is_conservative_for_handheld_capture() -> None:

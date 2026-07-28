@@ -140,6 +140,20 @@ def test_curved_warper_marks_projective_horizon_as_invalid_instead_of_remapping_
     assert np.all(mask[:, 10] == 0)
 
 
+def test_curved_warper_rejects_periodic_backside_of_cylindrical_inverse_map() -> None:
+    frame = Frame(0, 0.0, np.full((20, 100, 3), 127, dtype=np.uint8))
+    projection = create_projection("cylindrical", CameraParameters(50.0, 50.0, 10.0))
+    canvas = CanvasModel(500, 20, np.eye(3), [], projection)
+    # At x=407 the inverse local angle is close to pi for this translated
+    # frame. ``tan`` maps it near the source centre although it is behind the
+    # camera and must remain invalid.
+    transform = np.array([[1.0, 0.0, 200.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+
+    _, mask = FrameWarper().warp(frame, transform, canvas)
+
+    assert mask[10, 407] == 0
+
+
 def test_motion_analyzer_is_conservative_without_chain_evidence() -> None:
     assert MotionAnalyzer().analyze([], []) == MotionAnalysis.fallback()
 
@@ -162,3 +176,31 @@ def test_motion_analyzer_classifies_stable_rotation_and_orbit_risk() -> None:
     assert rotation_analysis.capture_mode == "rotation"
     assert rotation_analysis.confidence > 0.5
     assert orbit_analysis.capture_mode == "orbit"
+
+
+def test_motion_analyzer_requires_a_better_cylindrical_preview_for_auto_rotation() -> None:
+    planar = [np.array([[1.0, 0.0, 8.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])] * 2
+    cylindrical = [np.array([[1.0, 0.0, 8.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])] * 2
+    planar_metrics = [
+        {"valid": True, "reprojection_error": 3.0, "inliers": 16, "good_matches": 20},
+        {"valid": True, "reprojection_error": 3.0, "inliers": 16, "good_matches": 20},
+    ]
+    cylindrical_metrics = [
+        {"valid": True, "reprojection_error": 1.0, "inliers": 17, "good_matches": 20},
+        {"valid": True, "reprojection_error": 1.0, "inliers": 17, "good_matches": 20},
+    ]
+
+    analysis = MotionAnalyzer().analyze(planar, planar_metrics, (cylindrical, cylindrical_metrics))
+
+    assert analysis.capture_mode == "rotation"
+    assert analysis.reason == "cylindrical_preview_explains_rotation_better"
+    assert analysis.measurements["cylindrical_residual_gain"] == pytest.approx(2 / 3)
+
+
+def test_motion_analyzer_keeps_auto_linear_when_cylindrical_preview_is_not_better() -> None:
+    transforms = [np.array([[1.0, 0.0, 8.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])] * 2
+    metrics = [{"valid": True, "reprojection_error": 1.0, "inliers": 16, "good_matches": 20}] * 2
+
+    analysis = MotionAnalyzer().analyze(transforms, metrics, (transforms, metrics))
+
+    assert analysis.capture_mode == "linear"

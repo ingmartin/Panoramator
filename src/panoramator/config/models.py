@@ -50,6 +50,7 @@ class PanoramaConfig:
     seam_blur_kernel: int = 1
     seam_band_width: int = 7
     enable_photometric_normalization: bool = True
+    enable_global_photometric_normalization: bool = False
     photometric_smoothing: float = 0.65
     overlap_sharpness_weight: float = 0.35
     # 24 px proved too coarse on handheld office_rotation footage: it reduced
@@ -58,6 +59,9 @@ class PanoramaConfig:
     rotation_min_new_coverage_ratio: float = 0.01
     photometric_gain_limit: float = 0.12
     photometric_offset_limit: float = 20.0
+    enable_narrow_gap_fill: bool = True
+    max_narrow_gap_width: int = 4
+    photo_crop_margin_px: int = 3
     crop_result: bool = True
     photo_mode: bool = False
     crop_policy: str = "auto"
@@ -197,6 +201,10 @@ class PanoramaConfig:
             raise ValueError("photometric_gain_limit must be between 0.0 and 0.5")
         if self.photometric_offset_limit < 0:
             raise ValueError("photometric_offset_limit must be >= 0")
+        if self.max_narrow_gap_width < 1:
+            raise ValueError("max_narrow_gap_width must be >= 1")
+        if self.photo_crop_margin_px < 0:
+            raise ValueError("photo_crop_margin_px must be >= 0")
         if self.final_sharpen_strength < 0:
             raise ValueError("final_sharpen_strength must be >= 0")
         if self.final_sharpen_sigma <= 0:

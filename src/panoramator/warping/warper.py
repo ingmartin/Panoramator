@@ -48,6 +48,10 @@ class FrameWarper:
             local_surface = np.full((len(homogeneous), 2), np.nan, dtype=np.float64)
             local_surface[valid] = local_homogeneous[valid, :2] / denominator[valid, None]
             source = np.full((len(homogeneous), 2), -1.0, dtype=np.float64)
+            valid_indices = np.flatnonzero(valid)
+            if len(valid_indices):
+                surface_valid = projection.valid_surface_points(local_surface[valid_indices])
+                valid[valid_indices[~surface_valid]] = False
             source[valid] = projection.unproject_points(local_surface[valid])
             valid &= np.isfinite(source).all(axis=1)
             map_x = source[:, 0].reshape(bottom - top, canvas.width).astype(np.float32)

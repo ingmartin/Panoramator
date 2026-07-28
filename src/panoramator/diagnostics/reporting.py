@@ -46,6 +46,8 @@ def write_diagnostics(
         "seam_metrics": diagnostics.seam_metrics,
         "keyframe_metrics": diagnostics.keyframe_metrics,
         "photometric_metrics": diagnostics.photometric_metrics,
+        "global_photometric_metrics": diagnostics.global_photometric_metrics,
+        "gap_fill_metrics": diagnostics.gap_fill_metrics,
         "status": diagnostics.status,
     }
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")

@@ -36,6 +36,10 @@ def _build_args(**overrides) -> argparse.Namespace:
         "no_photometric_normalization": False,
         "photometric_smoothing": None,
         "overlap_sharpness_weight": None,
+        "narrow_gap_fill": False,
+        "no_narrow_gap_fill": False,
+        "max_narrow_gap_width": None,
+        "photo_crop_margin_px": None,
         "photo_mode": False,
         "final_sharpening": False,
         "no_final_sharpening": False,
@@ -105,6 +109,10 @@ def test_build_command_applies_overrides_and_prints_summary(monkeypatch, capsys)
         no_photometric_normalization=True,
         photometric_smoothing=0.8,
         overlap_sharpness_weight=0.4,
+        narrow_gap_fill=True,
+        no_narrow_gap_fill=True,
+        max_narrow_gap_width=3,
+        photo_crop_margin_px=5,
         photo_mode=True,
         final_sharpening=True,
         no_final_sharpening=True,
@@ -141,6 +149,9 @@ def test_build_command_applies_overrides_and_prints_summary(monkeypatch, capsys)
     assert config.enable_photometric_normalization is False
     assert config.photometric_smoothing == 0.8
     assert config.overlap_sharpness_weight == 0.4
+    assert config.enable_narrow_gap_fill is False
+    assert config.max_narrow_gap_width == 3
+    assert config.photo_crop_margin_px == 5
     assert config.photo_mode is True
     assert config.enable_final_sharpening is False
     assert config.final_sharpen_strength == 0.5
@@ -207,13 +218,21 @@ def test_export_config_command_saves_file(tmp_path, capsys) -> None:
 def test_create_parser_routes_supported_subcommands() -> None:
     parser = cli_main.create_parser()
 
-    build_args = parser.parse_args(["build", "video.mp4", "out.png", "--photo-mode", "--sampling-step", "7"])
+    build_args = parser.parse_args(
+        [
+            "build", "video.mp4", "out.png", "--photo-mode", "--sampling-step", "7",
+            "--no-narrow-gap-fill", "--max-narrow-gap-width", "3", "--photo-crop-margin-px", "5",
+        ]
+    )
     inspect_args = parser.parse_args(["inspect-video", "video.mp4"])
     export_args = parser.parse_args(["export-config"])
 
     assert build_args.func is cli_main.build_command
     assert build_args.photo_mode is True
     assert build_args.sampling_step == 7
+    assert build_args.no_narrow_gap_fill is True
+    assert build_args.max_narrow_gap_width == 3
+    assert build_args.photo_crop_margin_px == 5
     assert inspect_args.func is cli_main.inspect_video_command
     assert export_args.func is cli_main.export_config_command
 

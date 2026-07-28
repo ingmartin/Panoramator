@@ -97,6 +97,8 @@ def test_config_json_round_trip_preserves_user_settings(tmp_path) -> None:
         ({"seam_band_width": 0}, "seam_band_width must be >= 1"),
         ({"photometric_smoothing": -0.1}, "photometric_smoothing must be between 0.0 and 1.0"),
         ({"overlap_sharpness_weight": -0.1}, "overlap_sharpness_weight must be >= 0"),
+        ({"max_narrow_gap_width": 0}, "max_narrow_gap_width must be >= 1"),
+        ({"photo_crop_margin_px": -1}, "photo_crop_margin_px must be >= 0"),
         ({"final_sharpen_sigma": 0.0}, "final_sharpen_sigma must be > 0"),
     ],
 )

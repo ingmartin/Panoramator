@@ -18,6 +18,10 @@ class Projection(ABC):
     def unproject_points(self, points: np.ndarray) -> np.ndarray:
         """Map panorama surface coordinates back to reference-plane points."""
 
+    @abstractmethod
+    def valid_surface_points(self, points: np.ndarray) -> np.ndarray:
+        """Return points that map to the front-facing source-camera plane."""
+
 
 class PlanarProjection(Projection):
     name = "planar"
@@ -27,6 +31,9 @@ class PlanarProjection(Projection):
 
     def unproject_points(self, points: np.ndarray) -> np.ndarray:
         return np.asarray(points, dtype=np.float64).copy()
+
+    def valid_surface_points(self, points: np.ndarray) -> np.ndarray:
+        return np.ones(np.asarray(points).shape[:-1], dtype=bool)
 
 
 class CylindricalProjection(Projection):
@@ -51,6 +58,14 @@ class CylindricalProjection(Projection):
         x = f * np.tan(theta)
         y = (points[..., 1] - self.camera.center_y) / np.cos(theta)
         return np.stack((x + self.camera.center_x, y + self.camera.center_y), axis=-1)
+
+    def valid_surface_points(self, points: np.ndarray) -> np.ndarray:
+        points = np.asarray(points, dtype=np.float64)
+        theta = (points[..., 0] - self.camera.center_x) / self.camera.focal_length_px
+        # ``tan(theta)`` repeats every pi.  Only the front-facing half-plane is
+        # physically visible by the original pinhole camera; accepting the next
+        # branch folds the first frame back into the far end of a panorama.
+        return np.isfinite(theta) & (np.cos(theta) > 1e-8)
 
 
 class SphericalProjection(CylindricalProjection):

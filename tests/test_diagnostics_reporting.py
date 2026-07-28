@@ -20,6 +20,7 @@ def test_write_diagnostics_creates_debug_files(tmp_path) -> None:
         attempted_backends=["orb", "sift"],
         attempted_sampling_steps=[15, 8],
         output_files=["out.png"],
+        gap_fill_metrics={"filled_runs": 2.0, "filled_pixels": 6.0},
     )
 
     output_files = write_diagnostics(tmp_path / "result.png", PanoramaConfig(), diagnostics)
@@ -32,3 +33,4 @@ def test_write_diagnostics_creates_debug_files(tmp_path) -> None:
     assert report["fallback_used"] is True
     assert report["fallback_attempted"] is True
     assert report["attempted_sampling_steps"] == [15, 8]
+    assert report["gap_fill_metrics"] == {"filled_runs": 2.0, "filled_pixels": 6.0}

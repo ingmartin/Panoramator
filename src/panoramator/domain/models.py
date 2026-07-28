@@ -102,6 +102,8 @@ class PanoramaDiagnostics:
     seam_metrics: list[dict[str, float]] = field(default_factory=list)
     keyframe_metrics: list[dict[str, float | str]] = field(default_factory=list)
     photometric_metrics: list[dict[str, float]] = field(default_factory=list)
+    global_photometric_metrics: list[dict[str, float]] = field(default_factory=list)
+    gap_fill_metrics: dict[str, float] = field(default_factory=dict)
     status: str = "ok"
 
 

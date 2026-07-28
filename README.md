@@ -25,10 +25,13 @@ This repository is published under the MIT license. See `LICENSE`.
 * smarter local frame selection by sharpest candidate in a window;
 * ORB or SIFT feature extraction;
 * feature matching and geometry estimation with `translation`, `partial_affine`, `affine`, or `homography`;
-* global canvas construction;
+* planar, cylindrical, and spherical projection surfaces with camera FOV/focal-length parameters;
+* global canvas construction with curved-contour bounds;
+* rotation-specific keyframe decimation, trajectory smoothing, photometric overlap correction, and seam selection;
 * feather blending with additional seam smoothing, photometric normalization, and detail-aware overlap weighting;
 * automatic black border cropping;
-* optional `photo-mode` crop of a planar panorama to the fully visible rectangle without internal black wedges;
+* optional strict `photo-mode` crop for planar and curved panoramas, including a safety margin for curved edges;
+* narrow internal mask-gap filling for curved panoramas, with diagnostics;
 * final mild panorama sharpening;
 * `ORB -> SIFT` fallback when the valid frame chain is too short;
 * denser `sampling_step` fallback when a second pass is needed;
@@ -128,6 +131,14 @@ All parameters can be set through `PanoramaConfig`, a JSON config file, or parti
 * `max_rotation_degrees` - maximum allowed rotation between neighboring frames. Default: `12.0`.
 * `max_homography_corner_scale` - maximum allowed projected width or height of one frame relative to its source size in `homography` mode. Default: `2.0`.
 
+### Capture Mode, Projection, and Camera
+
+* `capture_mode` - `auto`, `linear`, `rotation`, or `orbit`. `auto` is deliberately conservative and falls back to `linear`. Default: `auto`.
+* `projection` - `auto`, `planar`, `cylindrical`, or `spherical`. An explicit projection overrides automatic surface selection. Default: `auto`.
+* `focal_length_px` or `horizontal_fov_degrees` - optional mutually exclusive camera calibration inputs for curved projections.
+* `projection_center_x`, `projection_center_y` - optional principal point in source pixels.
+* `projection_contour_samples` - contour samples used to compute a curved canvas. Default: `32`.
+
 ### Canvas and Stitching
 
 * `max_canvas_width` - hard limit for final canvas width. Helps prevent excessive memory use. Default: `12000`.
@@ -140,12 +151,20 @@ All parameters can be set through `PanoramaConfig`, a JSON config file, or parti
 * `seam_band_width` - width of the band around seam boundaries where local smoothing is allowed. Default: `7`.
 * `enable_photometric_normalization` - matches brightness and contrast between neighboring selected frames before warping. Default: `True`.
 * `photometric_smoothing` - how strongly neighboring frames are normalized toward each other. Default: `0.65`.
+* `enable_global_photometric_normalization` - opt-in anchored overlap correction across the complete curved chain. Default: `False`; CLI: `--global-photometric-normalization`.
 * `overlap_sharpness_weight` - how much blending should favor locally sharper content in overlap areas. Default: `0.35`.
+* `rotation_min_baseline_px` - minimum accumulated translation before retaining another rotation keyframe. Default: `12.0`.
+* `rotation_min_new_coverage_ratio` - minimum new-mask fraction before a curved frame receives a new seam. Default: `0.01`.
+* `photometric_gain_limit`, `photometric_offset_limit` - safety limits for curved overlap colour correction. Defaults: `0.12`, `20.0`.
 
 ### Postprocessing and Artifacts
 
 * `crop_result` - enables automatic cropping of black borders after stitching. Default: `True`.
-* `photo_mode` - crops a planar panorama more aggressively to the largest rectangle fully inside the visible area. Cylindrical and spherical panoramas safely fall back to outer-boundary cropping because a strict rectangle can discard most of the result. Default: `False`.
+* `photo_mode` - strictly crops to the largest fully visible rectangle for any projection. Curved panoramas additionally erode the visible mask by `photo_crop_margin_px`, so this can remove more useful area in exchange for clean edges. Default: `False`.
+* `crop_policy` - `auto`, `bounding`, `inscribed_rectangle`, or `preserve_alpha`. Explicit policy overrides automatic crop selection. Default: `auto`.
+* `max_inscribed_crop_loss`, `max_inscribed_crop_width_loss` - safety thresholds for an explicit inscribed crop outside `photo_mode`. Defaults: `0.35`, `0.25`.
+* `photo_crop_margin_px` - inward crop margin for curved `photo_mode`. Default: `3`.
+* `enable_narrow_gap_fill`, `max_narrow_gap_width` - fill only enclosed, horizontal mask gaps up to this width in curved panoramas. Defaults: `True`, `4`.
 * `enable_final_sharpening` - applies a final mild unsharp-mask pass to the completed panorama. Default: `True`.
 * `final_sharpen_strength` - strength of the final panorama sharpening pass. Default: `0.15`.
 * `final_sharpen_sigma` - Gaussian sigma used by the final panorama sharpening pass. Default: `1.0`.
@@ -179,6 +198,13 @@ All parameters can be set through `PanoramaConfig`, a JSON config file, or parti
   "min_inlier_count": 8,
   "min_inlier_ratio": 0.4,
   "motion_model": "affine",
+  "capture_mode": "auto",
+  "projection": "auto",
+  "focal_length_px": null,
+  "horizontal_fov_degrees": null,
+  "projection_center_x": null,
+  "projection_center_y": null,
+  "projection_contour_samples": 32,
   "ransac_threshold": 4.0,
   "max_reprojection_error": 6.0,
   "max_scale_deviation": 0.15,
@@ -190,10 +216,25 @@ All parameters can be set through `PanoramaConfig`, a JSON config file, or parti
   "seam_blur_kernel": 1,
   "seam_band_width": 7,
   "enable_photometric_normalization": true,
+  "enable_global_photometric_normalization": false,
   "photometric_smoothing": 0.65,
   "overlap_sharpness_weight": 0.35,
+  "rotation_min_baseline_px": 12.0,
+  "rotation_min_new_coverage_ratio": 0.01,
+  "photometric_gain_limit": 0.12,
+  "photometric_offset_limit": 20.0,
+  "enable_narrow_gap_fill": true,
+  "max_narrow_gap_width": 4,
+  "photo_crop_margin_px": 3,
   "crop_result": true,
   "photo_mode": false,
+  "crop_policy": "auto",
+  "max_inscribed_crop_loss": 0.35,
+  "max_inscribed_crop_width_loss": 0.25,
+  "trajectory_smoothing_window": 5,
+  "max_rotation_scale_correction": 0.02,
+  "orbit_max_reprojection_error": 3.5,
+  "orbit_min_dominant_inlier_ratio": 0.55,
   "enable_final_sharpening": true,
   "final_sharpen_strength": 0.15,
   "final_sharpen_sigma": 1.0,
@@ -231,8 +272,14 @@ If seam lines are visible in the panorama, you can tune feather width and very l
 panoramator build VID_20260709_140742.mp4 output.png --seam-blur-kernel 7 --seam-band-width 9 --feather-blend-kernel 25
 ```
 
-If you need a photo-like planar frame without any black corners after warping, enable `photo-mode`:
+For a camera rotating in place, use a curved surface and optionally provide camera calibration:
 
 ```bash
-panoramator build VID_20260709_140742.mp4 output.png --photo-mode
+panoramator build input.mp4 output.png --capture-mode rotation --horizontal-fov-degrees 70
+```
+
+If you need a photo-like frame without black corners, enable `photo-mode`. For curved panoramas it intentionally trims a small edge margin; increase it when edge artefacts remain:
+
+```bash
+panoramator build input.mp4 output.png --capture-mode rotation --photo-mode --photo-crop-margin-px 5
 ```

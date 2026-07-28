@@ -37,6 +37,7 @@ from panoramator.postprocess.enhance import (
     apply_final_sharpening,
     normalize_selected_frames,
 )
+from panoramator.postprocess.gaps import fill_narrow_mask_gaps
 from panoramator.projection.models import Projection, create_projection
 from panoramator.projection.preprocess import project_frame_for_geometry
 from panoramator.selection.selector import FrameSelector
@@ -78,8 +79,23 @@ class PanoramaBuilder:
         if len(chain_result.filtered_frames) < 2:
             raise RuntimeError("No valid frame chain remained after geometry validation")
 
-        analysis = self.motion_analyzer.analyze(chain_result.pairwise_homographies, chain_result.pair_metrics)
+        cylindrical_preview: _ChainBuildResult | None = None
+        if self.config.capture_mode == "auto" and self.config.projection == "auto":
+            cylindrical_preview = self._build_cylindrical_preview(chain_result)
+        analysis = self.motion_analyzer.analyze(
+            chain_result.pairwise_homographies,
+            chain_result.pair_metrics,
+            (
+                (cylindrical_preview.pairwise_homographies, cylindrical_preview.pair_metrics)
+                if cylindrical_preview is not None
+                else None
+            ),
+        )
         decision = resolve_strategy(self.config, analysis)
+        if decision.capture_mode == "rotation" and cylindrical_preview is not None:
+            # These transforms were estimated in cylindrical local coordinates,
+            # which is required by the final curved renderer.
+            chain_result = cylindrical_preview
         keyframe_metrics: list[dict[str, float | str]] = []
         if decision.capture_mode == "rotation":
             chain_result, keyframe_metrics = self._decimate_rotation_chain(chain_result)
@@ -139,6 +155,16 @@ class PanoramaBuilder:
                 prefer_sharp_source=True,
             )
         visible_mask = self._combined_visible_mask(warped_masks)
+        gap_fill_metrics: dict[str, float] = {}
+        if (
+            self.config.enable_narrow_gap_fill
+            and decision.projection != "planar"
+            and not self.config.photo_mode
+            and visible_mask is not None
+        ):
+            panorama, visible_mask, gap_fill_metrics = fill_narrow_mask_gaps(
+                panorama, visible_mask, self.config.max_narrow_gap_width
+            )
         crop_policy = "none"
         crop_loss = 0.0
         before_crop_size = (panorama.shape[1], panorama.shape[0])
@@ -153,6 +179,11 @@ class PanoramaBuilder:
                 max_inscribed_loss=self.config.max_inscribed_crop_loss,
                 max_inscribed_width_loss=self.config.max_inscribed_crop_width_loss,
                 force_inscribed=self.config.photo_mode,
+                inscribed_margin=(
+                    self.config.photo_crop_margin_px
+                    if self.config.photo_mode and decision.projection != "planar"
+                    else 0
+                ),
             )
         panorama = apply_final_sharpening(panorama, self.config)
 
@@ -208,6 +239,8 @@ class PanoramaBuilder:
             seam_metrics=self.blender.last_seam_metrics,
             keyframe_metrics=keyframe_metrics,
             photometric_metrics=self.blender.last_photometric_metrics,
+            global_photometric_metrics=self.blender.last_global_photometric_metrics,
+            gap_fill_metrics=gap_fill_metrics,
             status=orbit_status,
         )
         if self.config.save_debug_artifacts:
@@ -252,6 +285,27 @@ class PanoramaBuilder:
             if self._is_better_chain(candidate, best):
                 best = candidate
         return best
+
+    def _build_cylindrical_preview(self, chain: _ChainBuildResult) -> _ChainBuildResult | None:
+        """Build a reduced-commitment curved geometry candidate for ``auto``.
+
+        It reuses already selected frames, so it neither changes sampling nor
+        silently replaces the compatible planar chain unless the strategy picks
+        the preview.
+        """
+        preview_config = replace(
+            self.config,
+            sampling_step=chain.sampling_step,
+            capture_mode="rotation",
+            projection="cylindrical",
+        )
+        preview = self._build_chain_with_fallback(
+            chain.selected_frames,
+            chain.rejected_frames,
+            preview_config,
+            [chain.sampling_step],
+        )
+        return preview if len(preview.filtered_frames) >= 2 else None
 
     def _build_chain_with_fallback(
         self,
@@ -480,13 +534,23 @@ class PanoramaBuilder:
             previous = global_homographies[keep[-1]][:2, 2]
             current = global_homographies[index][:2, 2]
             baseline = float(np.linalg.norm(current - previous))
+            height, width = chain.filtered_frames[index].frame.image.shape[:2]
+            # Translation on the projected surface provides a conservative,
+            # cheap coverage estimate before the final canvas exists.  It is a
+            # gate in addition to baseline, not a replacement for it.
+            delta = np.abs(current - previous)
+            new_coverage_ratio = min(1.0, float(delta[0] / max(1, width) + delta[1] / max(1, height)))
             is_last = index == len(chain.filtered_frames) - 1
-            accepted = baseline >= threshold or is_last
+            accepted = (
+                baseline >= threshold
+                and new_coverage_ratio >= self.config.rotation_min_new_coverage_ratio
+            ) or is_last
             metrics.append(
                 {
                     "frame_index": float(chain.filtered_frames[index].frame.index),
                     "baseline_px": baseline,
-                    "decision": "accepted" if accepted else "rejected_insufficient_baseline",
+                    "new_coverage_ratio": new_coverage_ratio,
+                    "decision": "accepted" if accepted else "rejected_insufficient_baseline_or_coverage",
                 }
             )
             if accepted:
@@ -518,9 +582,13 @@ class PanoramaBuilder:
             return "ok"
         measurements = getattr(analysis, "measurements", {})
         error = float(measurements.get("mean_reprojection_error", float("inf")))
+        dominant_ratio = float(measurements.get("mean_inlier_ratio", 0.0))
         # The current global-surface path is deliberately opt-in only when its
         # residual is low enough to be honest about the result.
-        if error > self.config.orbit_max_reprojection_error:
+        if (
+            error > self.config.orbit_max_reprojection_error
+            or dominant_ratio < self.config.orbit_min_dominant_inlier_ratio
+        ):
             return "orbit_not_supported_reliably"
         return "orbit_dominant_global_surface"
 

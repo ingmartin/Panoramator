@@ -12,6 +12,7 @@ def crop_with_policy(
     max_inscribed_loss: float,
     max_inscribed_width_loss: float,
     force_inscribed: bool = False,
+    inscribed_margin: int = 0,
 ) -> tuple[np.ndarray, str, float]:
     """Apply a projection-aware crop policy and report any safety fallback."""
     if policy == "preserve_alpha":
@@ -27,7 +28,15 @@ def crop_with_policy(
     if policy == "bounding":
         return bounding, policy, 0.0
 
-    inscribed = crop_to_visible_area(image, visible_mask)
+    crop_mask = _resolve_visible_mask(image, visible_mask)
+    if inscribed_margin > 0:
+        kernel = np.ones((2 * inscribed_margin + 1, 2 * inscribed_margin + 1), dtype=np.uint8)
+        eroded_mask = cv2.erode(crop_mask, kernel, iterations=1, borderType=cv2.BORDER_CONSTANT, borderValue=0)
+        # An oversized margin must not turn an otherwise valid photo crop into
+        # the uncropped source image (which can reintroduce black borders).
+        if np.any(eroded_mask):
+            crop_mask = eroded_mask
+    inscribed = crop_to_visible_area(image, crop_mask)
     bounding_area = max(1, bounding.shape[0] * bounding.shape[1])
     loss = 1.0 - (inscribed.shape[0] * inscribed.shape[1] / bounding_area)
     width_loss = 1.0 - (inscribed.shape[1] / max(1, bounding.shape[1]))

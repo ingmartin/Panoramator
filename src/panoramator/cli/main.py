@@ -56,6 +56,10 @@ def build_command(args: argparse.Namespace) -> int:
         config.enable_photometric_normalization = True
     if args.no_photometric_normalization:
         config.enable_photometric_normalization = False
+    if getattr(args, "global_photometric_normalization", False):
+        config.enable_global_photometric_normalization = True
+    if getattr(args, "no_global_photometric_normalization", False):
+        config.enable_global_photometric_normalization = False
     if args.photometric_smoothing is not None:
         config.photometric_smoothing = args.photometric_smoothing
     if args.overlap_sharpness_weight is not None:
@@ -68,6 +72,14 @@ def build_command(args: argparse.Namespace) -> int:
         config.photometric_gain_limit = args.photometric_gain_limit
     if getattr(args, "photometric_offset_limit", None) is not None:
         config.photometric_offset_limit = args.photometric_offset_limit
+    if getattr(args, "narrow_gap_fill", False):
+        config.enable_narrow_gap_fill = True
+    if getattr(args, "no_narrow_gap_fill", False):
+        config.enable_narrow_gap_fill = False
+    if getattr(args, "max_narrow_gap_width", None) is not None:
+        config.max_narrow_gap_width = args.max_narrow_gap_width
+    if getattr(args, "photo_crop_margin_px", None) is not None:
+        config.photo_crop_margin_px = args.photo_crop_margin_px
     if args.photo_mode:
         config.photo_mode = True
     if getattr(args, "crop_policy", None) is not None:
@@ -168,12 +180,18 @@ def create_parser() -> argparse.ArgumentParser:
     build.add_argument("--seam-band-width", type=int)
     build.add_argument("--photometric-normalization", action="store_true")
     build.add_argument("--no-photometric-normalization", action="store_true")
+    build.add_argument("--global-photometric-normalization", action="store_true")
+    build.add_argument("--no-global-photometric-normalization", action="store_true")
     build.add_argument("--photometric-smoothing", type=float)
     build.add_argument("--overlap-sharpness-weight", type=float)
     build.add_argument("--rotation-min-baseline-px", type=float)
     build.add_argument("--rotation-min-new-coverage-ratio", type=float)
     build.add_argument("--photometric-gain-limit", type=float)
     build.add_argument("--photometric-offset-limit", type=float)
+    build.add_argument("--narrow-gap-fill", action="store_true")
+    build.add_argument("--no-narrow-gap-fill", action="store_true")
+    build.add_argument("--max-narrow-gap-width", type=int)
+    build.add_argument("--photo-crop-margin-px", type=int)
     build.add_argument("--photo-mode", action="store_true")
     build.add_argument("--crop-policy", choices=["auto", "bounding", "inscribed_rectangle", "preserve_alpha"])
     build.add_argument("--max-inscribed-crop-loss", type=float)
