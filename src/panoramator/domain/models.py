@@ -94,10 +94,17 @@ class PanoramaDiagnostics:
     strategy_confidence: float = 0.0
     strategy_reason: str = ""
     strategy_measurements: dict[str, float] = field(default_factory=dict)
+    crop_policy: str = "none"
+    crop_before_size: tuple[int, int] | None = None
+    crop_after_size: tuple[int, int] | None = None
+    crop_lost_area_fraction: float = 0.0
+    trajectory: dict[str, list[float]] = field(default_factory=dict)
+    seam_metrics: list[dict[str, float]] = field(default_factory=list)
+    status: str = "ok"
 
 
 @dataclass(slots=True)
 class PanoramaResult:
-    image: ImageArray
+    image: ImageArray | None
     metadata: VideoMetadata
     diagnostics: PanoramaDiagnostics

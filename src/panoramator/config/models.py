@@ -54,6 +54,13 @@ class PanoramaConfig:
     overlap_sharpness_weight: float = 0.35
     crop_result: bool = True
     photo_mode: bool = False
+    crop_policy: str = "auto"
+    max_inscribed_crop_loss: float = 0.35
+    max_inscribed_crop_width_loss: float = 0.25
+    trajectory_smoothing_window: int = 5
+    max_rotation_scale_correction: float = 0.02
+    orbit_max_reprojection_error: float = 3.5
+    orbit_min_dominant_inlier_ratio: float = 0.55
     enable_final_sharpening: bool = True
     final_sharpen_strength: float = 0.15
     final_sharpen_sigma: float = 1.0
@@ -79,6 +86,7 @@ class PanoramaConfig:
         self.motion_model = self.motion_model.lower()
         self.capture_mode = self.capture_mode.lower()
         self.projection = self.projection.lower()
+        self.crop_policy = self.crop_policy.lower()
         if self.sampling_step < 1:
             raise ValueError("sampling_step must be >= 1")
         if self.max_frames < 1:
@@ -123,6 +131,20 @@ class PanoramaConfig:
             raise ValueError("capture_mode must be one of: auto, linear, rotation, orbit")
         if self.projection not in {"auto", "planar", "cylindrical", "spherical"}:
             raise ValueError("projection must be one of: auto, planar, cylindrical, spherical")
+        if self.crop_policy not in {"auto", "bounding", "inscribed_rectangle", "preserve_alpha"}:
+            raise ValueError("crop_policy must be one of: auto, bounding, inscribed_rectangle, preserve_alpha")
+        if not 0.0 <= self.max_inscribed_crop_loss < 1.0:
+            raise ValueError("max_inscribed_crop_loss must be between 0.0 and 1.0")
+        if not 0.0 <= self.max_inscribed_crop_width_loss < 1.0:
+            raise ValueError("max_inscribed_crop_width_loss must be between 0.0 and 1.0")
+        if self.trajectory_smoothing_window < 1:
+            raise ValueError("trajectory_smoothing_window must be >= 1")
+        if not 0.0 <= self.max_rotation_scale_correction <= 0.1:
+            raise ValueError("max_rotation_scale_correction must be between 0.0 and 0.1")
+        if self.orbit_max_reprojection_error <= 0:
+            raise ValueError("orbit_max_reprojection_error must be > 0")
+        if not 0.0 < self.orbit_min_dominant_inlier_ratio <= 1.0:
+            raise ValueError("orbit_min_dominant_inlier_ratio must be between 0.0 (exclusive) and 1.0")
         if self.focal_length_px is not None and (not isfinite(self.focal_length_px) or self.focal_length_px <= 0):
             raise ValueError("focal_length_px must be > 0")
         if self.horizontal_fov_degrees is not None and (

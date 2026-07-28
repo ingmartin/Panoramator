@@ -9,6 +9,7 @@ from panoramator.config.models import PanoramaConfig
 class AverageBlender:
     def __init__(self, config: PanoramaConfig) -> None:
         self.config = config
+        self.last_seam_metrics: list[dict[str, float]] = []
 
     def blend(
         self,
@@ -19,13 +20,14 @@ class AverageBlender:
     ) -> np.ndarray:
         if not warped_frames:
             raise RuntimeError("No warped frames provided to blender")
+        self.last_seam_metrics = []
+        if prefer_sharp_source:
+            return self._blend_with_seams(warped_frames, warped_masks, frame_sharpnesses)
         acc = np.zeros_like(warped_frames[0], dtype=np.float64)
         weight = np.zeros(warped_masks[0].shape, dtype=np.float64)
         sharpness_mean = 0.0
         if frame_sharpnesses:
             sharpness_mean = float(np.mean(np.asarray(frame_sharpnesses, dtype=np.float64)))
-        best_frame = np.zeros_like(warped_frames[0]) if prefer_sharp_source else None
-        best_score = np.zeros(warped_masks[0].shape, dtype=np.float64) if prefer_sharp_source else None
         for index, (frame, mask) in enumerate(zip(warped_frames, warped_masks, strict=True)):
             edge_weight = self._weight_map(mask)
             normalized = edge_weight * self._detail_weight(frame, mask)
@@ -33,24 +35,88 @@ class AverageBlender:
                 normalized *= self._global_sharpness_weight(frame_sharpnesses[index], sharpness_mean)
             acc += frame.astype(np.float64) * normalized[..., None]
             weight += normalized
-            if best_frame is not None and best_score is not None:
-                selection_score = edge_weight
-                if frame_sharpnesses:
-                    selection_score = selection_score * self._global_sharpness_weight(
-                        frame_sharpnesses[index], sharpness_mean
-                    )
-                replace = selection_score > best_score
-                best_frame[replace] = frame[replace]
-                best_score[replace] = selection_score[replace]
-        if best_frame is not None:
-            # A global surface cannot align different scene depths perfectly.  In
-            # those overlap zones a single sharp source is preferable to averaging
-            # two shifted edges into a permanently blurred double contour.
-            return best_frame
         weight = np.maximum(weight, 1.0)
         blended = acc / weight[..., None]
         blended_uint8 = np.clip(blended, 0, 255).astype(np.uint8)
         return self._smooth_overlap_seams(blended_uint8, warped_masks)
+
+    def _blend_with_seams(
+        self, frames: list[np.ndarray], masks: list[np.ndarray], sharpnesses: list[float] | None) -> np.ndarray:
+        """Compose frames through a low-cost dynamic-programming seam.
+
+        It selects one source in a conflict area instead of averaging shifted
+        details; for the usual horizontal panorama the seam is a top-to-bottom
+        path.  Non-overlapping pixels are copied unchanged.
+        """
+        result = frames[0].copy()
+        coverage = masks[0] > 0
+        current_sharpness = sharpnesses[0] if sharpnesses else 1.0
+        for index in range(1, len(frames)):
+            incoming = frames[index]
+            incoming_mask = masks[index] > 0
+            overlap = coverage & incoming_mask
+            only_incoming = incoming_mask & ~coverage
+            result[only_incoming] = incoming[only_incoming]
+            if np.any(overlap):
+                incoming_sharpness = sharpnesses[index] if sharpnesses else 1.0
+                if not np.any(only_incoming):
+                    # A fully covered frame cannot extend the panorama.  Replacing
+                    # an arbitrary half of it causes a sequence of visible seams.
+                    if np.array_equal(incoming_mask, coverage) and incoming_sharpness > current_sharpness:
+                        result[overlap] = incoming[overlap]
+                    continue
+                use_incoming, cost = self._vertical_seam(result, incoming, overlap, only_incoming)
+                result[use_incoming] = incoming[use_incoming]
+                self.last_seam_metrics.append(
+                    {"frame_index": float(index), "mean_conflict": cost, "overlap_pixels": float(overlap.sum())}
+                )
+            coverage |= incoming_mask
+            current_sharpness = max(current_sharpness, sharpnesses[index] if sharpnesses else 1.0)
+        return result
+
+    @staticmethod
+    def _vertical_seam(
+        base: np.ndarray, incoming: np.ndarray, overlap: np.ndarray, only_incoming: np.ndarray
+    ) -> tuple[np.ndarray, float]:
+        """Find a smooth top-to-bottom seam joining the incoming frame's new edge."""
+        difference = np.mean(np.abs(base.astype(np.float32) - incoming.astype(np.float32)), axis=2)
+        gray = cv2.cvtColor(incoming, cv2.COLOR_BGR2GRAY)
+        salience = np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0)) + np.abs(cv2.Sobel(gray, cv2.CV_32F, 0, 1))
+        cost = difference + 0.15 * salience
+        ys, xs = np.where(overlap)
+        x0, x1 = int(xs.min()), int(xs.max())
+        y0, y1 = int(ys.min()), int(ys.max())
+        # Dynamic programming limits a seam's per-row movement.  The old
+        # independent row minimum was the direct source of the visible sawtooth.
+        local_cost = cost[y0 : y1 + 1, x0 : x1 + 1].copy()
+        local_overlap = overlap[y0 : y1 + 1, x0 : x1 + 1]
+        local_cost[~local_overlap] = 1e9
+        cumulative = local_cost.copy()
+        parents = np.zeros_like(cumulative, dtype=np.int32)
+        max_step = 4
+        for row in range(1, cumulative.shape[0]):
+            previous = cumulative[row - 1]
+            for raw_column in np.flatnonzero(local_overlap[row]):
+                column = int(raw_column)
+                start, end = max(0, column - max_step), min(cumulative.shape[1], column + max_step + 1)
+                relative = int(np.argmin(previous[start:end]))
+                parents[row, column] = start + relative
+                cumulative[row, column] += previous[start + relative]
+        end_x = int(np.argmin(cumulative[-1]))
+        seam = np.empty(cumulative.shape[0], dtype=np.int32)
+        seam[-1] = end_x
+        for row in range(len(seam) - 1, 0, -1):
+            seam[row - 1] = parents[row, seam[row]]
+        unique_y, unique_x = np.where(only_incoming)
+        incoming_on_right = float(np.mean(unique_x)) >= (x0 + x1) / 2.0
+        selected = np.zeros_like(overlap)
+        for row, seam_x in enumerate(seam, start=y0):
+            x = x0 + int(seam_x)
+            if incoming_on_right:
+                selected[row, x:x1 + 1] = overlap[row, x:x1 + 1]
+            else:
+                selected[row, x0:x] = overlap[row, x0:x]
+        return selected, float(np.mean(difference[overlap]))
 
     def _weight_map(self, mask: np.ndarray) -> np.ndarray:
         binary = (mask > 0).astype(np.uint8) * 255

@@ -27,11 +27,15 @@ class MotionAnalyzer:
         if any(matrix.shape != (3, 3) or not np.isfinite(matrix).all() for matrix in homographies):
             return MotionAnalysis.fallback()
         errors: list[float] = []
+        inlier_ratios: list[float] = []
         for item in valid:
             error = item.get("reprojection_error", 0.0)
             if not isinstance(error, int | float) or not np.isfinite(error):
                 return MotionAnalysis.fallback()
             errors.append(float(error))
+            inliers, good = item.get("inliers", 0), item.get("good_matches", 0)
+            if isinstance(inliers, int | float) and isinstance(good, int | float) and good > 0:
+                inlier_ratios.append(float(inliers) / float(good))
         rotations = []
         scales = []
         translations = []
@@ -45,7 +49,8 @@ class MotionAnalyzer:
         scale_std = float(np.std(scales))
         translation_mean = float(np.mean(translations))
         measurements = {"mean_reprojection_error": mean_error, "mean_rotation_degrees": rotation_mean,
-                        "scale_std": scale_std, "mean_translation_px": translation_mean, "pair_count": float(len(valid))}
+                        "scale_std": scale_std, "mean_translation_px": translation_mean, "pair_count": float(len(valid)),
+                        "mean_inlier_ratio": float(np.mean(inlier_ratios)) if inlier_ratios else 0.0}
         # Strong scale instability is a useful conservative parallax signal.
         if scale_std > 0.08 or mean_error > 4.0:
             return MotionAnalysis("orbit", min(0.95, 0.55 + scale_std + mean_error / 20.0), "spatially_inconsistent_geometry_or_scale_change", measurements)

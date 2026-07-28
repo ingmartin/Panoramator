@@ -27,10 +27,11 @@ from panoramator.geometry.homography import (
     HomographyEstimator,
     accumulate_global_homographies,
 )
+from panoramator.geometry.trajectory import stabilize_rotation_trajectory
 from panoramator.io.video import OpenCVVideoSource
 from panoramator.matching.matchers import BFMatcherAdapter
 from panoramator.motion_analysis.analyzer import MotionAnalyzer
-from panoramator.postprocess.crop import crop_black_borders, crop_to_visible_area
+from panoramator.postprocess.crop import crop_with_policy
 from panoramator.postprocess.enhance import (
     apply_final_sharpening,
     normalize_selected_frames,
@@ -77,10 +78,36 @@ class PanoramaBuilder:
             raise RuntimeError("No valid frame chain remained after geometry validation")
 
         normalized_frames = normalize_selected_frames(chain_result.filtered_frames, self.config)
-        global_homographies = accumulate_global_homographies(chain_result.pairwise_homographies)
         frame_shapes = [item.frame.image.shape[:2] for item in normalized_frames]
         analysis = self.motion_analyzer.analyze(chain_result.pairwise_homographies, chain_result.pair_metrics)
         decision = resolve_strategy(self.config, analysis)
+        orbit_status = self._orbit_status(decision.capture_mode, analysis)
+        if orbit_status == "orbit_not_supported_reliably":
+            diagnostics = PanoramaDiagnostics(
+                selected_frames=[{"frame_index": item.frame.index, "timestamp_seconds": item.frame.timestamp_seconds} for item in chain_result.selected_frames],
+                validated_frames=[{"frame_index": item.frame.index, "timestamp_seconds": item.frame.timestamp_seconds} for item in chain_result.filtered_frames],
+                rejected_frames=chain_result.rejected_frames,
+                pair_metrics=chain_result.pair_metrics,
+                feature_backend=chain_result.backend,
+                sampling_step=chain_result.sampling_step,
+                output_files=[],
+                capture_mode=decision.capture_mode,
+                projection=decision.projection,
+                strategy_confidence=decision.confidence,
+                strategy_reason=f"{decision.reason}; {orbit_status}",
+                strategy_measurements=decision.measurements,
+                status=orbit_status,
+            )
+            if self.config.save_debug_artifacts:
+                diagnostics.output_files.extend(write_diagnostics(output_path, self.config, diagnostics))
+            return PanoramaResult(image=None, metadata=metadata, diagnostics=diagnostics)
+        trajectory: dict[str, list[float]] = {}
+        if decision.capture_mode == "rotation":
+            stabilized = stabilize_rotation_trajectory(chain_result.pairwise_homographies, self.config)
+            global_homographies = stabilized.homographies
+            trajectory = stabilized.diagnostics
+        else:
+            global_homographies = accumulate_global_homographies(chain_result.pairwise_homographies)
         camera = CameraParameters.from_config(self.config, frame_shapes[0])
         projection = create_projection(decision.projection, camera)
         if decision.projection == "planar":
@@ -108,11 +135,20 @@ class PanoramaBuilder:
                 prefer_sharp_source=True,
             )
         visible_mask = self._combined_visible_mask(warped_masks)
+        crop_policy = "none"
+        crop_loss = 0.0
+        before_crop_size = (panorama.shape[1], panorama.shape[0])
         if self.config.crop_result:
-            if self.config.photo_mode and decision.projection == "planar":
-                panorama = crop_to_visible_area(panorama, visible_mask)
-            else:
-                panorama = crop_black_borders(panorama, visible_mask)
+            crop_policy = self._resolve_crop_policy(decision.projection)
+            if crop_policy == "preserve_alpha" and Path(output_path).suffix.lower() not in {".png", ".webp", ".tiff"}:
+                raise ValueError("crop_policy preserve_alpha requires a PNG, WebP, or TIFF output")
+            panorama, crop_policy, crop_loss = crop_with_policy(
+                panorama,
+                visible_mask,
+                crop_policy,
+                max_inscribed_loss=self.config.max_inscribed_crop_loss,
+                max_inscribed_width_loss=self.config.max_inscribed_crop_width_loss,
+            )
         panorama = apply_final_sharpening(panorama, self.config)
 
         output = Path(output_path)
@@ -159,6 +195,13 @@ class PanoramaBuilder:
             strategy_confidence=decision.confidence,
             strategy_reason=decision.reason,
             strategy_measurements=decision.measurements,
+            crop_policy=crop_policy,
+            crop_before_size=before_crop_size,
+            crop_after_size=(panorama.shape[1], panorama.shape[0]),
+            crop_lost_area_fraction=crop_loss,
+            trajectory=trajectory,
+            seam_metrics=self.blender.last_seam_metrics,
+            status=orbit_status,
         )
         if self.config.save_debug_artifacts:
             effective_config = replace(
@@ -411,6 +454,24 @@ class PanoramaBuilder:
         except RuntimeError:
             return False
         return True
+
+    def _resolve_crop_policy(self, projection: str) -> str:
+        if self.config.crop_policy != "auto":
+            return self.config.crop_policy
+        if self.config.photo_mode and projection == "planar":
+            return "inscribed_rectangle"
+        return "bounding"
+
+    def _orbit_status(self, capture_mode: str, analysis: object) -> str:
+        if capture_mode != "orbit":
+            return "ok"
+        measurements = getattr(analysis, "measurements", {})
+        error = float(measurements.get("mean_reprojection_error", float("inf")))
+        # The current global-surface path is deliberately opt-in only when its
+        # residual is low enough to be honest about the result.
+        if error > self.config.orbit_max_reprojection_error:
+            return "orbit_not_supported_reliably"
+        return "orbit_dominant_global_surface"
 
     @staticmethod
     def _combined_visible_mask(warped_masks: list[np.ndarray]) -> np.ndarray | None:

@@ -4,6 +4,37 @@ import cv2
 import numpy as np
 
 
+def crop_with_policy(
+    image: np.ndarray,
+    visible_mask: np.ndarray | None,
+    policy: str,
+    *,
+    max_inscribed_loss: float,
+    max_inscribed_width_loss: float,
+) -> tuple[np.ndarray, str, float]:
+    """Apply a projection-aware crop policy and report any safety fallback."""
+    if policy == "preserve_alpha":
+        mask = _resolve_visible_mask(image, visible_mask)
+        bounding = crop_black_borders(image, mask)
+        x, y, width, height = _bounding_rect(mask)
+        alpha = mask[y : y + height, x : x + width]
+        if bounding.ndim == 3 and bounding.shape[2] == 3:
+            return np.dstack((bounding, alpha)), policy, 0.0
+        return bounding, "bounding", 0.0
+
+    bounding = crop_black_borders(image, visible_mask)
+    if policy == "bounding":
+        return bounding, policy, 0.0
+
+    inscribed = crop_to_visible_area(image, visible_mask)
+    bounding_area = max(1, bounding.shape[0] * bounding.shape[1])
+    loss = 1.0 - (inscribed.shape[0] * inscribed.shape[1] / bounding_area)
+    width_loss = 1.0 - (inscribed.shape[1] / max(1, bounding.shape[1]))
+    if loss > max_inscribed_loss or width_loss > max_inscribed_width_loss:
+        return bounding, "bounding_fallback_excessive_inscribed_loss", loss
+    return inscribed, "inscribed_rectangle", loss
+
+
 def crop_black_borders(image: np.ndarray, visible_mask: np.ndarray | None = None) -> np.ndarray:
     mask = _resolve_visible_mask(image, visible_mask)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -12,6 +43,14 @@ def crop_black_borders(image: np.ndarray, visible_mask: np.ndarray | None = None
     contour = max(contours, key=cv2.contourArea)
     x, y, width, height = cv2.boundingRect(contour)
     return image[y : y + height, x : x + width]
+
+
+def _bounding_rect(mask: np.ndarray) -> tuple[int, int, int, int]:
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return 0, 0, mask.shape[1], mask.shape[0]
+    x, y, width, height = cv2.boundingRect(max(contours, key=cv2.contourArea))
+    return int(x), int(y), int(width), int(height)
 
 
 def crop_to_visible_area(image: np.ndarray, visible_mask: np.ndarray | None = None) -> np.ndarray:

@@ -17,6 +17,9 @@ _MAX_OFFSET = 24.0
 def apply_final_sharpening(image: np.ndarray, config: PanoramaConfig) -> np.ndarray:
     if not config.enable_final_sharpening or config.final_sharpen_strength <= 0:
         return image
+    if image.ndim == 3 and image.shape[2] == 4:
+        sharpened = _unsharp_mask(image[..., :3], config.final_sharpen_strength, config.final_sharpen_sigma)
+        return np.dstack((sharpened, image[..., 3]))
     return _unsharp_mask(image, config.final_sharpen_strength, config.final_sharpen_sigma)
 
 

@@ -62,6 +62,12 @@ def build_command(args: argparse.Namespace) -> int:
         config.overlap_sharpness_weight = args.overlap_sharpness_weight
     if args.photo_mode:
         config.photo_mode = True
+    if getattr(args, "crop_policy", None) is not None:
+        config.crop_policy = args.crop_policy
+    if getattr(args, "max_inscribed_crop_loss", None) is not None:
+        config.max_inscribed_crop_loss = args.max_inscribed_crop_loss
+    if getattr(args, "max_inscribed_crop_width_loss", None) is not None:
+        config.max_inscribed_crop_width_loss = args.max_inscribed_crop_width_loss
     if args.final_sharpening:
         config.enable_final_sharpening = True
     if args.no_final_sharpening:
@@ -88,7 +94,10 @@ def build_command(args: argparse.Namespace) -> int:
     config.validate()
 
     result = PanoramaBuilder(config).build_from_video(args.video_path, args.output_path)
-    print(f"Panorama saved to: {args.output_path}")
+    if result.diagnostics.status != "orbit_not_supported_reliably":
+        print(f"Panorama saved to: {args.output_path}")
+    else:
+        print("Panorama was not written: capture mode is not supported reliably")
     print(f"Selected frames: {len(result.diagnostics.selected_frames)}")
     print(f"Rejected frames: {len(result.diagnostics.rejected_frames)}")
     print(f"Feature backend: {result.diagnostics.feature_backend}")
@@ -96,6 +105,7 @@ def build_command(args: argparse.Namespace) -> int:
     print(f"Fallback used: {result.diagnostics.fallback_used}")
     print(f"Capture mode: {result.diagnostics.capture_mode}")
     print(f"Projection: {result.diagnostics.projection}")
+    print(f"Status: {result.diagnostics.status}")
     print(f"Video FPS: {result.metadata.fps}")
     return 0
 
@@ -153,6 +163,9 @@ def create_parser() -> argparse.ArgumentParser:
     build.add_argument("--photometric-smoothing", type=float)
     build.add_argument("--overlap-sharpness-weight", type=float)
     build.add_argument("--photo-mode", action="store_true")
+    build.add_argument("--crop-policy", choices=["auto", "bounding", "inscribed_rectangle", "preserve_alpha"])
+    build.add_argument("--max-inscribed-crop-loss", type=float)
+    build.add_argument("--max-inscribed-crop-width-loss", type=float)
     build.add_argument("--final-sharpening", action="store_true")
     build.add_argument("--no-final-sharpening", action="store_true")
     build.add_argument("--final-sharpen-strength", type=float)

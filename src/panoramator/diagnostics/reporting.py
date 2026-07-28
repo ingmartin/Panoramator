@@ -38,6 +38,13 @@ def write_diagnostics(
         "strategy_confidence": diagnostics.strategy_confidence,
         "strategy_reason": diagnostics.strategy_reason,
         "strategy_measurements": diagnostics.strategy_measurements,
+        "crop_policy": diagnostics.crop_policy,
+        "crop_before_size": diagnostics.crop_before_size,
+        "crop_after_size": diagnostics.crop_after_size,
+        "crop_lost_area_fraction": diagnostics.crop_lost_area_fraction,
+        "trajectory": diagnostics.trajectory,
+        "seam_metrics": diagnostics.seam_metrics,
+        "status": diagnostics.status,
     }
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     return [str(config_path), str(report_path)]
