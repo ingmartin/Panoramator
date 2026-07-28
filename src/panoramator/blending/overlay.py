@@ -10,6 +10,7 @@ class AverageBlender:
     def __init__(self, config: PanoramaConfig) -> None:
         self.config = config
         self.last_seam_metrics: list[dict[str, float]] = []
+        self.last_photometric_metrics: list[dict[str, float]] = []
 
     def blend(
         self,
@@ -21,6 +22,7 @@ class AverageBlender:
         if not warped_frames:
             raise RuntimeError("No warped frames provided to blender")
         self.last_seam_metrics = []
+        self.last_photometric_metrics = []
         if prefer_sharp_source:
             return self._blend_with_seams(warped_frames, warped_masks, frame_sharpnesses)
         acc = np.zeros_like(warped_frames[0], dtype=np.float64)
@@ -56,9 +58,22 @@ class AverageBlender:
             incoming_mask = masks[index] > 0
             overlap = coverage & incoming_mask
             only_incoming = incoming_mask & ~coverage
+            new_coverage_ratio = float(int(only_incoming.sum()) / max(1, int(incoming_mask.sum())))
+            incoming_sharpness = sharpnesses[index] if sharpnesses else 1.0
+            if not np.any(only_incoming) and np.array_equal(incoming_mask, coverage):
+                if incoming_sharpness > current_sharpness:
+                    result[overlap] = incoming[overlap]
+                continue
+            if new_coverage_ratio < self.config.rotation_min_new_coverage_ratio and np.any(coverage):
+                self.last_seam_metrics.append(
+                    {"frame_index": float(index), "new_coverage_ratio": new_coverage_ratio, "decision": -1.0}
+                )
+                continue
+            if np.any(overlap):
+                incoming, metric = self._photometrically_align(result, incoming, overlap, index)
+                self.last_photometric_metrics.append(metric)
             result[only_incoming] = incoming[only_incoming]
             if np.any(overlap):
-                incoming_sharpness = sharpnesses[index] if sharpnesses else 1.0
                 if not np.any(only_incoming):
                     # A fully covered frame cannot extend the panorama.  Replacing
                     # an arbitrary half of it causes a sequence of visible seams.
@@ -68,11 +83,58 @@ class AverageBlender:
                 use_incoming, cost = self._vertical_seam(result, incoming, overlap, only_incoming)
                 result[use_incoming] = incoming[use_incoming]
                 self.last_seam_metrics.append(
-                    {"frame_index": float(index), "mean_conflict": cost, "overlap_pixels": float(overlap.sum())}
+                    {
+                        "frame_index": float(index),
+                        "mean_conflict": cost,
+                        "overlap_pixels": float(overlap.sum()),
+                        "new_coverage_ratio": new_coverage_ratio,
+                        "decision": 1.0,
+                    }
                 )
             coverage |= incoming_mask
             current_sharpness = max(current_sharpness, sharpnesses[index] if sharpnesses else 1.0)
         return result
+
+    def _photometrically_align(
+        self, base: np.ndarray, incoming: np.ndarray, overlap: np.ndarray, index: int
+    ) -> tuple[np.ndarray, dict[str, float]]:
+        """Apply a robust overlap-only colour correction before selecting a seam."""
+        base_gray = cv2.cvtColor(base, cv2.COLOR_BGR2GRAY)
+        incoming_gray = cv2.cvtColor(incoming, cv2.COLOR_BGR2GRAY)
+        gradient = np.abs(cv2.Sobel(incoming_gray, cv2.CV_32F, 1, 0)) + np.abs(
+            cv2.Sobel(incoming_gray, cv2.CV_32F, 0, 1)
+        )
+        candidates = overlap & (base_gray > 8) & (base_gray < 247) & (incoming_gray > 8) & (incoming_gray < 247)
+        if np.any(candidates):
+            threshold = float(np.percentile(gradient[candidates], 60))
+            candidates &= gradient <= threshold
+        if int(candidates.sum()) < 32:
+            return incoming, {"frame_index": float(index), "sample_count": float(candidates.sum()), "applied": 0.0}
+        source = incoming[candidates].astype(np.float32)
+        target = base[candidates].astype(np.float32)
+        source_std = np.maximum(source.std(axis=0), 1.0)
+        gain = np.clip(target.std(axis=0) / source_std, 1.0 - self.config.photometric_gain_limit, 1.0 + self.config.photometric_gain_limit)
+        offset = np.clip(
+            np.median(target - source * gain, axis=0),
+            -self.config.photometric_offset_limit,
+            self.config.photometric_offset_limit,
+        )
+        corrected = np.clip(incoming.astype(np.float32) * gain + offset, 0, 255).astype(np.uint8)
+        before = float(np.mean(np.abs(target - source)))
+        after = float(np.mean(np.abs(base[candidates].astype(np.float32) - corrected[candidates].astype(np.float32))))
+        return corrected, {
+            "frame_index": float(index),
+            "sample_count": float(candidates.sum()),
+            "applied": 1.0,
+            "error_before": before,
+            "error_after": after,
+            "gain_b": float(gain[0]),
+            "gain_g": float(gain[1]),
+            "gain_r": float(gain[2]),
+            "offset_b": float(offset[0]),
+            "offset_g": float(offset[1]),
+            "offset_r": float(offset[2]),
+        }
 
     @staticmethod
     def _vertical_seam(

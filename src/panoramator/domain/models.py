@@ -100,6 +100,8 @@ class PanoramaDiagnostics:
     crop_lost_area_fraction: float = 0.0
     trajectory: dict[str, list[float]] = field(default_factory=dict)
     seam_metrics: list[dict[str, float]] = field(default_factory=list)
+    keyframe_metrics: list[dict[str, float | str]] = field(default_factory=list)
+    photometric_metrics: list[dict[str, float]] = field(default_factory=list)
     status: str = "ok"
 
 

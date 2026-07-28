@@ -44,6 +44,8 @@ def write_diagnostics(
         "crop_lost_area_fraction": diagnostics.crop_lost_area_fraction,
         "trajectory": diagnostics.trajectory,
         "seam_metrics": diagnostics.seam_metrics,
+        "keyframe_metrics": diagnostics.keyframe_metrics,
+        "photometric_metrics": diagnostics.photometric_metrics,
         "status": diagnostics.status,
     }
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")

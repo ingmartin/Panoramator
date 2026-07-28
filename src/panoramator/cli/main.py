@@ -60,6 +60,14 @@ def build_command(args: argparse.Namespace) -> int:
         config.photometric_smoothing = args.photometric_smoothing
     if args.overlap_sharpness_weight is not None:
         config.overlap_sharpness_weight = args.overlap_sharpness_weight
+    if getattr(args, "rotation_min_baseline_px", None) is not None:
+        config.rotation_min_baseline_px = args.rotation_min_baseline_px
+    if getattr(args, "rotation_min_new_coverage_ratio", None) is not None:
+        config.rotation_min_new_coverage_ratio = args.rotation_min_new_coverage_ratio
+    if getattr(args, "photometric_gain_limit", None) is not None:
+        config.photometric_gain_limit = args.photometric_gain_limit
+    if getattr(args, "photometric_offset_limit", None) is not None:
+        config.photometric_offset_limit = args.photometric_offset_limit
     if args.photo_mode:
         config.photo_mode = True
     if getattr(args, "crop_policy", None) is not None:
@@ -162,6 +170,10 @@ def create_parser() -> argparse.ArgumentParser:
     build.add_argument("--no-photometric-normalization", action="store_true")
     build.add_argument("--photometric-smoothing", type=float)
     build.add_argument("--overlap-sharpness-weight", type=float)
+    build.add_argument("--rotation-min-baseline-px", type=float)
+    build.add_argument("--rotation-min-new-coverage-ratio", type=float)
+    build.add_argument("--photometric-gain-limit", type=float)
+    build.add_argument("--photometric-offset-limit", type=float)
     build.add_argument("--photo-mode", action="store_true")
     build.add_argument("--crop-policy", choices=["auto", "bounding", "inscribed_rectangle", "preserve_alpha"])
     build.add_argument("--max-inscribed-crop-loss", type=float)

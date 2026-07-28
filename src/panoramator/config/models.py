@@ -52,6 +52,12 @@ class PanoramaConfig:
     enable_photometric_normalization: bool = True
     photometric_smoothing: float = 0.65
     overlap_sharpness_weight: float = 0.35
+    # 24 px proved too coarse on handheld office_rotation footage: it reduced
+    # stripe count but made the remaining geometric discontinuities prominent.
+    rotation_min_baseline_px: float = 12.0
+    rotation_min_new_coverage_ratio: float = 0.01
+    photometric_gain_limit: float = 0.12
+    photometric_offset_limit: float = 20.0
     crop_result: bool = True
     photo_mode: bool = False
     crop_policy: str = "auto"
@@ -183,6 +189,14 @@ class PanoramaConfig:
             raise ValueError("photometric_smoothing must be between 0.0 and 1.0")
         if self.overlap_sharpness_weight < 0:
             raise ValueError("overlap_sharpness_weight must be >= 0")
+        if self.rotation_min_baseline_px < 0:
+            raise ValueError("rotation_min_baseline_px must be >= 0")
+        if not 0.0 <= self.rotation_min_new_coverage_ratio < 1.0:
+            raise ValueError("rotation_min_new_coverage_ratio must be between 0.0 and 1.0")
+        if not 0.0 <= self.photometric_gain_limit <= 0.5:
+            raise ValueError("photometric_gain_limit must be between 0.0 and 0.5")
+        if self.photometric_offset_limit < 0:
+            raise ValueError("photometric_offset_limit must be >= 0")
         if self.final_sharpen_strength < 0:
             raise ValueError("final_sharpen_strength must be >= 0")
         if self.final_sharpen_sigma <= 0:

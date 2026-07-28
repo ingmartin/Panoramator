@@ -77,10 +77,14 @@ class PanoramaBuilder:
         if len(chain_result.filtered_frames) < 2:
             raise RuntimeError("No valid frame chain remained after geometry validation")
 
-        normalized_frames = normalize_selected_frames(chain_result.filtered_frames, self.config)
-        frame_shapes = [item.frame.image.shape[:2] for item in normalized_frames]
         analysis = self.motion_analyzer.analyze(chain_result.pairwise_homographies, chain_result.pair_metrics)
         decision = resolve_strategy(self.config, analysis)
+        keyframe_metrics: list[dict[str, float | str]] = []
+        if decision.capture_mode == "rotation":
+            chain_result, keyframe_metrics = self._decimate_rotation_chain(chain_result)
+            analysis = self.motion_analyzer.analyze(chain_result.pairwise_homographies, chain_result.pair_metrics)
+        normalized_frames = normalize_selected_frames(chain_result.filtered_frames, self.config)
+        frame_shapes = [item.frame.image.shape[:2] for item in normalized_frames]
         orbit_status = self._orbit_status(decision.capture_mode, analysis)
         if orbit_status == "orbit_not_supported_reliably":
             diagnostics = PanoramaDiagnostics(
@@ -201,6 +205,8 @@ class PanoramaBuilder:
             crop_lost_area_fraction=crop_loss,
             trajectory=trajectory,
             seam_metrics=self.blender.last_seam_metrics,
+            keyframe_metrics=keyframe_metrics,
+            photometric_metrics=self.blender.last_photometric_metrics,
             status=orbit_status,
         )
         if self.config.save_debug_artifacts:
@@ -454,6 +460,46 @@ class PanoramaBuilder:
         except RuntimeError:
             return False
         return True
+
+    def _decimate_rotation_chain(
+        self, chain: _ChainBuildResult
+    ) -> tuple[_ChainBuildResult, list[dict[str, float | str]]]:
+        """Keep rotation keyframes only when they add a useful geometric baseline."""
+        global_homographies = accumulate_global_homographies(chain.pairwise_homographies)
+        keep = [0]
+        metrics: list[dict[str, float | str]] = [
+            {"frame_index": float(chain.filtered_frames[0].frame.index), "baseline_px": 0.0, "decision": "anchor"}
+        ]
+        threshold = self.config.rotation_min_baseline_px
+        for index in range(1, len(chain.filtered_frames)):
+            previous = global_homographies[keep[-1]][:2, 2]
+            current = global_homographies[index][:2, 2]
+            baseline = float(np.linalg.norm(current - previous))
+            is_last = index == len(chain.filtered_frames) - 1
+            accepted = baseline >= threshold or is_last
+            metrics.append(
+                {
+                    "frame_index": float(chain.filtered_frames[index].frame.index),
+                    "baseline_px": baseline,
+                    "decision": "accepted" if accepted else "rejected_insufficient_baseline",
+                }
+            )
+            if accepted:
+                keep.append(index)
+        if len(keep) == len(chain.filtered_frames):
+            return chain, metrics
+        kept_globals = [global_homographies[index] for index in keep]
+        pairwise = [
+            np.linalg.inv(left) @ right for left, right in zip(kept_globals, kept_globals[1:])
+        ]
+        return (
+            replace(
+                chain,
+                filtered_frames=[chain.filtered_frames[index] for index in keep],
+                pairwise_homographies=pairwise,
+            ),
+            metrics,
+        )
 
     def _resolve_crop_policy(self, projection: str) -> str:
         if self.config.crop_policy != "auto":

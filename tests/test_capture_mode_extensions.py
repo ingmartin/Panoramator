@@ -3,7 +3,9 @@ from __future__ import annotations
 import numpy as np
 
 from panoramator.blending.overlay import AverageBlender
+from panoramator.application.use_cases import PanoramaBuilder, _ChainBuildResult
 from panoramator.config.models import PanoramaConfig
+from panoramator.domain.models import Frame, FrameQuality, SelectedFrame
 from panoramator.geometry.trajectory import stabilize_rotation_trajectory
 from panoramator.postprocess.crop import crop_with_policy
 
@@ -61,3 +63,56 @@ def test_seam_blender_chooses_single_source_in_overlap() -> None:
 
     assert np.all(result[:, -1] == 200)
     assert blender.last_seam_metrics[0]["overlap_pixels"] == 24.0
+
+
+def test_rotation_chain_is_decimated_by_geometric_baseline() -> None:
+    frames = [
+        SelectedFrame(Frame(index, 0.0, np.zeros((4, 4, 3), dtype=np.uint8)), FrameQuality(1.0, 1.0, True, "ok"))
+        for index in range(4)
+    ]
+    pairs = [
+        np.array([[1.0, 0.0, 5.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+        np.array([[1.0, 0.0, 5.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+        np.array([[1.0, 0.0, 20.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+    ]
+    chain = _ChainBuildResult("orb", 1, ["orb"], [1], frames, [], frames, pairs, [])
+
+    decimated, metrics = PanoramaBuilder(PanoramaConfig(rotation_min_baseline_px=15.0))._decimate_rotation_chain(chain)
+
+    assert [item.frame.index for item in decimated.filtered_frames] == [0, 3]
+    assert len(decimated.pairwise_homographies) == 1
+    assert metrics[1]["decision"] == "rejected_insufficient_baseline"
+
+
+def test_rotation_baseline_default_is_conservative_for_handheld_capture() -> None:
+    assert PanoramaConfig().rotation_min_baseline_px == 12.0
+
+
+def test_rotation_blender_skips_frame_with_negligible_new_coverage() -> None:
+    blender = AverageBlender(PanoramaConfig(rotation_min_new_coverage_ratio=0.2, feather_blend_kernel=1))
+    first = np.full((10, 10, 3), 20, dtype=np.uint8)
+    second = np.full((10, 10, 3), 200, dtype=np.uint8)
+    first_mask = np.full((10, 10), 255, dtype=np.uint8)
+    second_mask = first_mask.copy()
+    second_mask[0, 0] = 0
+
+    result = blender.blend([first, second], [first_mask, second_mask], prefer_sharp_source=True)
+
+    assert np.all(result == 20)
+    assert blender.last_seam_metrics[0]["decision"] == -1.0
+
+
+def test_rotation_blender_reduces_overlap_colour_error() -> None:
+    blender = AverageBlender(PanoramaConfig(rotation_min_new_coverage_ratio=0.0, feather_blend_kernel=1))
+    first = np.full((10, 10, 3), 100, dtype=np.uint8)
+    second = np.full((10, 10, 3), 130, dtype=np.uint8)
+    first_mask = np.zeros((10, 10), dtype=np.uint8)
+    first_mask[:, :8] = 255
+    second_mask = np.zeros((10, 10), dtype=np.uint8)
+    second_mask[:, 2:] = 255
+
+    blender.blend([first, second], [first_mask, second_mask], prefer_sharp_source=True)
+
+    metric = blender.last_photometric_metrics[0]
+    assert metric["applied"] == 1.0
+    assert metric["error_after"] < metric["error_before"]
