@@ -47,19 +47,24 @@ class CylinderUnwrapBuilder:
         canvas = np.zeros((config.output_height, config.output_width, 3), np.uint8)
         weights = np.zeros((config.output_height, config.output_width), np.float32)
         target_angles = np.linspace(min_angle, max_angle, config.output_width, dtype=np.float32)
-        map_y = np.repeat(np.arange(config.output_height, dtype=np.float32)[:, None], config.output_width, axis=1)
-        for (fragment, mask), angle in zip(fragments, angles, strict=True):
+        for item, (_, _), angle in zip(frames, fragments, angles, strict=True):
             local_angles = target_angles - angle
             visible = np.abs(local_angles) <= half_view_angle
             # Orthographic cylindrical projection: x / r = sin(theta).  The
             # inverse mapping preserves the geometry of the observed texture
             # instead of linearly stretching each source strip.
-            source_coordinate = np.sin(local_angles) / config.central_band_ratio
-            map_x_row = ((source_coordinate + 1.0) * 0.5 * (fragment.shape[1] - 1)).astype(np.float32)
+            x, y, width, height = item.bbox
+            axis_x = x + (width - 1) * 0.5
+            radius = max((width - 1) * 0.5, 1.0)
+            # Each source view has its own fitted axis, radius and vertical
+            # interval.  This avoids stretching a view to another view's box.
+            map_x_row = (axis_x + radius * np.sin(local_angles)).astype(np.float32)
             map_x_row[~visible] = -1.0
             map_x = np.repeat(map_x_row[None, :], config.output_height, axis=0)
-            mapped_image = cv2.remap(fragment, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
-            mapped_mask = cv2.remap(mask, map_x, map_y, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT)
+            source_y = np.linspace(y, y + height - 1, config.output_height, dtype=np.float32)
+            source_map_y = np.repeat(source_y[:, None], config.output_width, axis=1)
+            mapped_image = cv2.remap(item.frame.image, map_x, source_map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+            mapped_mask = cv2.remap(item.mask, map_x, source_map_y, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT)
             column_weights = np.cos(local_angles).astype(np.float32)
             column_weights[~visible] = 0.0
             for target_x in np.flatnonzero(visible):
@@ -69,9 +74,9 @@ class CylinderUnwrapBuilder:
                 weights[replace, target_x] = column_weights[target_x]
         coverage = np.where(weights > 0, 255, 0).astype(np.uint8)
         seam = least_covered_seam(coverage)
-        # Put seam at x=0, preserving the chosen low-coverage region.
-        canvas = np.roll(canvas, -seam, axis=1)
-        coverage = np.roll(coverage, -seam, axis=1)
+        # Preserve chronological orientation: x=0 corresponds to the first
+        # observation.  Moving the seam is a presentation choice and must not
+        # silently reorder the surface sequence.
         fit.model.seam_angle_degrees = seam / config.output_width * angle_span / (2 * np.pi) * 360.0
         return canvas, coverage, fit.model, {
             "coverage_fraction": coverage_fraction(coverage),

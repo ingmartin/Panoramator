@@ -74,7 +74,7 @@ class UnwrapConfig:
     min_coverage: float = 0.90
     output_height: int = 512
     output_width: int = 1536
-    central_band_ratio: float = 0.62
+    central_band_ratio: float = 0.55
     max_pose_residual_radians: float = 0.08
 
     def validate(self) -> None:
