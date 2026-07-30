@@ -106,7 +106,15 @@ def flow_angular_increment(
     )  # type: ignore[call-overload]
     if tracked is None or status is None or errors is None:
         return 0.0, 0.0
-    valid = (status.ravel() == 1) & (errors.ravel() < 18.0)
+    if tracked is None:
+        return 0.0, 0.0
+    backward, backward_status, backward_errors = cv2.calcOpticalFlowPyrLK(
+        right_gray, left_gray, tracked, None, None, None, (21, 21), 3
+    )  # type: ignore[call-overload]
+    if backward is None or backward_status is None or backward_errors is None:
+        return 0.0, 0.0
+    roundtrip = np.linalg.norm(backward.reshape(-1, 2) - points.reshape(-1, 2), axis=1)
+    valid = (status.ravel() == 1) & (errors.ravel() < 18.0) & (backward_status.ravel() == 1) & (roundtrip < 1.25)
     origin = points.reshape(-1, 2)[valid]
     destination = tracked.reshape(-1, 2)[valid]
     if len(origin) < 12:

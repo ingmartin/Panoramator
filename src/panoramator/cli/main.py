@@ -154,6 +154,7 @@ def unwrap_command(args: argparse.Namespace) -> int:
         min_coverage=args.min_coverage,
         output_width=args.output_width,
         output_height=args.output_height,
+        enable_global_pose_optimization=args.global_pose_optimization,
     )
     result = ObjectUnwrapper(config).unwrap_video(args.video_path, args.output_path)
     print(f"Status: {result.diagnostics.status.value}")
@@ -241,6 +242,11 @@ def create_parser() -> argparse.ArgumentParser:
     unwrap.add_argument("--min-coverage", type=float, default=0.90)
     unwrap.add_argument("--output-width", type=int, default=1536)
     unwrap.add_argument("--output-height", type=int, default=512)
+    unwrap.add_argument(
+        "--global-pose-optimization",
+        action="store_true",
+        help="Enable the conservative multi-frame pose gate for the experimental cylindrical renderer",
+    )
     unwrap.set_defaults(func=unwrap_command)
 
     inspect_video = subparsers.add_parser("inspect-video", help="Inspect video metadata")

@@ -8,46 +8,64 @@ from ..coverage import coverage_fraction, least_covered_seam
 from ..models import SurfaceModel, UnwrapConfig
 from .fitting import fit_cylinder
 from .mapper import angular_increment, central_band, feature_shift, flow_angular_increment, horizontal_shift, normalized_wall
+from .pose import solve_monotonic_trajectory
 
 
 class CylinderUnwrapBuilder:
-    def build(self, frames: list[AnalyzedFrame], config: UnwrapConfig) -> tuple[np.ndarray, np.ndarray, SurfaceModel, dict[str, float | int | str | list[float]]]:
+    def build(
+        self, frames: list[AnalyzedFrame], config: UnwrapConfig
+    ) -> tuple[np.ndarray, np.ndarray, SurfaceModel, dict[str, float | int | str | list[float] | list[int]], dict[str, np.ndarray]]:
         fit = fit_cylinder(frames)
         fragments = [
             central_band(*normalized_wall(item.frame.image, item.mask, item.bbox, config.output_height), config.central_band_ratio)
             for item in frames
         ]
         half_view_angle = float(np.arcsin(config.central_band_ratio))
-        responses: list[float] = []
-        raw_steps: list[float] = []
+        observations: list[tuple[float, float]] = []
         for (previous, previous_mask), (current, current_mask) in zip(fragments, fragments[1:], strict=False):
-            step, response = angular_increment(previous, previous_mask, current, current_mask, config.central_band_ratio)
-            if response < 0.25:
-                shift, fallback_response = feature_shift(previous, previous_mask, current, current_mask)
-                if fallback_response >= 0.25:
-                    step = float(-shift / max(previous.shape[1], 1) * 2.0 * half_view_angle)
-                    response = fallback_response
-                else:
-                    shift, response = horizontal_shift(previous, current)
-                    step = float(-shift / 256.0 * half_view_angle)
-            responses.append(response)
-            raw_steps.append(step)
-        nonzero = [abs(step) for step in raw_steps if abs(step) > 1e-4]
-        baseline = float(np.median(nonzero)) if nonzero else half_view_angle * 0.18
-        direction = 1.0 if sum(raw_steps) >= 0 else -1.0
-        lower, upper = baseline * 0.35, baseline * 2.0
-        steps = [direction * float(np.clip(abs(step), lower, upper)) for step in raw_steps]
-        angles = [0.0]
-        for step in steps:
-            angles.append(angles[-1] + step)
-        pose_residual = 0.0
+            if config.enable_global_pose_optimization:
+                step, response = flow_angular_increment(previous, previous_mask, current, config.central_band_ratio)
+                if response < 0.35:
+                    step, response = angular_increment(previous, previous_mask, current, current_mask, config.central_band_ratio)
+            else:
+                step, response = angular_increment(previous, previous_mask, current, current_mask, config.central_band_ratio)
+                if response < 0.25:
+                    shift, fallback_response = feature_shift(previous, previous_mask, current, current_mask)
+                    if fallback_response >= 0.25:
+                        step = float(-shift / max(previous.shape[1], 1) * 2.0 * half_view_angle)
+                        response = fallback_response
+                    else:
+                        shift, response = horizontal_shift(previous, current)
+                        step = float(-shift / 256.0 * half_view_angle)
+            observations.append((step, response))
+        responses = [response for _, response in observations]
+        if config.enable_global_pose_optimization:
+            trajectory = solve_monotonic_trajectory(observations)
+            angles, steps = trajectory.angles, trajectory.steps
+            pose_residual = trajectory.residual_radians
+        else:
+            raw_steps = [step for step, _ in observations]
+            nonzero = [abs(step) for step in raw_steps if abs(step) > 1e-4]
+            baseline = float(np.median(nonzero)) if nonzero else half_view_angle * 0.18
+            direction = 1.0 if sum(raw_steps) >= 0 else -1.0
+            steps = [direction * float(np.clip(abs(step), baseline * 0.35, baseline * 2.0)) for step in raw_steps]
+            angles = [0.0]
+            for step in steps:
+                angles.append(angles[-1] + step)
+            pose_residual = 0.0
         min_angle = min(angles) - half_view_angle
         max_angle = max(angles) + half_view_angle
         angle_span = max(max_angle - min_angle, 1e-6)
-        canvas = np.zeros((config.output_height, config.output_width, 3), np.uint8)
-        weights = np.zeros((config.output_height, config.output_width), np.float32)
-        target_angles = np.linspace(min_angle, max_angle, config.output_width, dtype=np.float32)
-        for item, (_, _), angle in zip(frames, fragments, angles, strict=True):
+        atlas_width, pixels_per_radian = self._atlas_width(fit.boxes, angle_span, config)
+        canvas = np.zeros((config.output_height, atlas_width, 3), np.uint8)
+        weights = np.zeros((config.output_height, atlas_width), np.float32)
+        # A pixel-owner map makes the selected source explicit.  Zero means an
+        # unobserved pixel; frame numbers are stored one-based so it is suitable
+        # for a lossless grayscale PNG.
+        source_map = np.zeros((config.output_height, atlas_width), np.uint16)
+        local_error = np.zeros((config.output_height, atlas_width), np.float32)
+        target_angles = np.linspace(min_angle, max_angle, atlas_width, dtype=np.float32)
+        for frame_offset, (item, (_, _), angle) in enumerate(zip(frames, fragments, angles, strict=True), start=1):
             local_angles = target_angles - angle
             visible = np.abs(local_angles) <= half_view_angle
             # Orthographic cylindrical projection: x / r = sin(theta).  The
@@ -62,31 +80,71 @@ class CylinderUnwrapBuilder:
             map_x_row[~visible] = -1.0
             map_x = np.repeat(map_x_row[None, :], config.output_height, axis=0)
             source_y = np.linspace(y, y + height - 1, config.output_height, dtype=np.float32)
-            source_map_y = np.repeat(source_y[:, None], config.output_width, axis=1)
+            source_map_y = np.repeat(source_y[:, None], atlas_width, axis=1)
             mapped_image = cv2.remap(item.frame.image, map_x, source_map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
             mapped_mask = cv2.remap(item.mask, map_x, source_map_y, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT)
             column_weights = np.cos(local_angles).astype(np.float32)
             column_weights[~visible] = 0.0
             for target_x in np.flatnonzero(visible):
                 valid = mapped_mask[:, target_x] > 0
+                competing = valid & (weights[:, target_x] > 0)
+                if np.any(competing):
+                    difference = np.mean(
+                        np.abs(
+                            canvas[competing, target_x].astype(np.float32)
+                            - mapped_image[competing, target_x].astype(np.float32)
+                        ),
+                        axis=1,
+                    )
+                    local_error[competing, target_x] = np.maximum(local_error[competing, target_x], difference)
                 replace = valid & (column_weights[target_x] > weights[:, target_x])
                 canvas[replace, target_x] = mapped_image[replace, target_x]
                 weights[replace, target_x] = column_weights[target_x]
+                source_map[replace, target_x] = frame_offset
         coverage = np.where(weights > 0, 255, 0).astype(np.uint8)
         seam = least_covered_seam(coverage)
         # Preserve chronological orientation: x=0 corresponds to the first
         # observation.  Moving the seam is a presentation choice and must not
         # silently reorder the surface sequence.
-        fit.model.seam_angle_degrees = seam / config.output_width * angle_span / (2 * np.pi) * 360.0
+        fit.model.seam_angle_degrees = seam / atlas_width * angle_span / (2 * np.pi) * 360.0
+        artifacts: dict[str, np.ndarray] = {
+            "source": source_map,
+            "reprojection_error": np.clip(local_error, 0, 255).astype(np.uint8),
+        }
         return canvas, coverage, fit.model, {
             "coverage_fraction": coverage_fraction(coverage),
             "surface_coverage_fraction": min(1.0, angle_span / (2.0 * np.pi)),
             "observed_angle_degrees": angle_span / (2.0 * np.pi) * 360.0,
+            "atlas_width": atlas_width,
+            "pixels_per_radian": pixels_per_radian,
             "match_response": responses,
             "angular_steps": steps,
             "pose_residual_radians": pose_residual,
+            "accepted_pose_pairs": (trajectory.accepted_pairs if config.enable_global_pose_optimization else 0),
+            "trajectory_sweep_degrees": (
+                trajectory.sweep_radians / (2.0 * np.pi) * 360.0 if config.enable_global_pose_optimization else 0.0
+            ),
+            "repeated_observation_detected": (
+                int(trajectory.repeated_observation) if config.enable_global_pose_optimization else 0
+            ),
             "mapping": "surface_angle_height",
-        }
+        }, artifacts
+
+    @staticmethod
+    def _atlas_width(boxes: list[tuple[int, int, int, int]], angle_span: float, config: UnwrapConfig) -> tuple[int, float]:
+        """Choose atlas width in the same physical scale as its height.
+
+        Near the centre of a cylindrical view, ``dx = radius * d_angle``.
+        Scaling vertical pixels by ``output_height / source_height`` therefore
+        defines the only aspect-preserving scale for the unwrapped horizontal
+        coordinate.  ``output_width`` is a resolution ceiling, not permission
+        to stretch a partial angular observation to a fixed rectangle.
+        """
+        source_height = float(np.median([box[3] for box in boxes]))
+        radius = float(np.median([box[2] for box in boxes])) * 0.5
+        pixels_per_radian = config.output_height / max(source_height, 1.0) * max(radius, 1.0)
+        width = int(round(angle_span * pixels_per_radian))
+        return int(np.clip(width, 64, config.output_width)), pixels_per_radian
 
     def _global_angles(
         self, fragments: list[tuple[np.ndarray, np.ndarray]], central_band_ratio: float

@@ -43,17 +43,30 @@ class ObjectUnwrapper:
             return self._failure(output, analysis.status, analysis.message, analysis.recommendation, analysis.kind)
 
         if analysis.kind is SurfaceKind.CYLINDRICAL:
-            image, coverage, model, measurements = CylinderUnwrapBuilder().build(analysis.frames, self.config)
+            image, coverage, model, measurements, artifacts = CylinderUnwrapBuilder().build(analysis.frames, self.config)
             fallback = False
         else:
-            image, coverage, model, measurements = CurvedSurfaceFallbackBuilder().build(analysis.frames, self.config)
+            image, coverage, model, measurements, artifacts = CurvedSurfaceFallbackBuilder().build(analysis.frames, self.config)
             fallback = True
         surface_coverage = measurements.get("surface_coverage_fraction", coverage_fraction(coverage))
         fraction = float(surface_coverage) if isinstance(surface_coverage, (int, float)) else coverage_fraction(coverage)
         measurements["surface_coverage_fraction"] = fraction
         measurements["frame_count"] = len(analysis.frames)
         selected = [item.frame.index for item in analysis.frames]
-        if fallback:
+        pose_residual = measurements.get("pose_residual_radians")
+        geometry_rejected = (
+            self.config.enable_global_pose_optimization
+            and (
+                not isinstance(pose_residual, (int, float))
+                or not np.isfinite(pose_residual)
+                or pose_residual > self.config.max_pose_residual_radians
+            )
+        )
+        if geometry_rejected:
+            status = UnwrapStatus.UNSTABLE_CAMERA_GEOMETRY
+            message = "The tracked views do not agree on one stable surface trajectory."
+            recommendation = "Record a slower orbit with more overlap and less camera shake."
+        elif fallback:
             status = UnwrapStatus.PARTIAL_SURFACE
             message = "Only the observed side band is available; a mesh UV reconstruction is not sufficiently supported by the video."
             recommendation = "Record the surface from more viewpoints with overlapping frames."
@@ -66,8 +79,10 @@ class ObjectUnwrapper:
             message = "The surface map was assembled from observed pixels."
             recommendation = ""
         diagnostics = UnwrapDiagnostics(status, message, recommendation, analysis.kind, measurements, selected)
-        if status is UnwrapStatus.INSUFFICIENT_COVERAGE or (status is UnwrapStatus.PARTIAL_SURFACE and not self.config.allow_partial):
-            write_artifacts(output, diagnostics, coverage)
+        if status in {UnwrapStatus.INSUFFICIENT_COVERAGE, UnwrapStatus.UNSTABLE_CAMERA_GEOMETRY} or (
+            status is UnwrapStatus.PARTIAL_SURFACE and not self.config.allow_partial
+        ):
+            write_artifacts(output, diagnostics, coverage, artifacts)
             return UnwrapResult(None, coverage, model, diagnostics)
         bgra = cv2.cvtColor(image, cv2.COLOR_BGR2BGRA)
         bgra[:, :, 3] = coverage
@@ -77,7 +92,7 @@ class ObjectUnwrapper:
         if not cv2.imwrite(str(output), bgra):
             raise RuntimeError(f"Failed to write unwrap image: {output}")
         diagnostics.output_files = [str(output)]
-        diagnostics.output_files.extend(write_artifacts(output, diagnostics, coverage))
+        diagnostics.output_files.extend(write_artifacts(output, diagnostics, coverage, artifacts))
         return UnwrapResult(bgra, coverage, model, diagnostics, output)
 
     def _failure(self, output: Path, status: UnwrapStatus, message: str, recommendation: str, kind: SurfaceKind) -> UnwrapResult:

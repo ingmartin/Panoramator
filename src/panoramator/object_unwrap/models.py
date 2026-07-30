@@ -43,7 +43,7 @@ class UnwrapDiagnostics:
     message: str
     recommendation: str
     surface_kind: SurfaceKind
-    measurements: dict[str, float | int | str | list[float]] = field(default_factory=dict)
+    measurements: dict[str, float | int | str | list[float] | list[int]] = field(default_factory=dict)
     selected_frames: list[int] = field(default_factory=list)
     output_files: list[str] = field(default_factory=list)
 
@@ -76,11 +76,12 @@ class UnwrapConfig:
     output_width: int = 1536
     central_band_ratio: float = 0.55
     max_pose_residual_radians: float = 0.08
+    enable_global_pose_optimization: bool = False
 
     def validate(self) -> None:
         self.surface_kind = SurfaceKind(self.surface_kind)
-        if self.sampling_step < 1 or self.max_frames < 2:
-            raise ValueError("sampling_step must be >= 1 and max_frames must be >= 2")
+        if self.sampling_step < 1 or not 2 <= self.max_frames <= 65_535:
+            raise ValueError("sampling_step must be >= 1 and max_frames must be between 2 and 65535")
         if not 0 < self.min_object_area_ratio < 1:
             raise ValueError("min_object_area_ratio must be between 0 and 1")
         if not 0 < self.min_coverage <= 1:
