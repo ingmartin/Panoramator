@@ -5,6 +5,7 @@ from pathlib import Path
 
 from panoramator.application.use_cases import PanoramaBuilder
 from panoramator.config.models import PanoramaConfig
+from panoramator.object_unwrap import SurfaceKind, ObjectUnwrapper, UnwrapConfig, UnwrapStatus
 
 
 def build_command(args: argparse.Namespace) -> int:
@@ -144,6 +145,27 @@ def inspect_video_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def unwrap_command(args: argparse.Namespace) -> int:
+    config = UnwrapConfig(
+        surface_kind=SurfaceKind(args.surface_kind),
+        allow_partial=args.allow_partial,
+        sampling_step=args.sampling_step,
+        max_frames=args.max_frames,
+        min_coverage=args.min_coverage,
+        output_width=args.output_width,
+        output_height=args.output_height,
+    )
+    result = ObjectUnwrapper(config).unwrap_video(args.video_path, args.output_path)
+    print(f"Status: {result.diagnostics.status.value}")
+    print(f"Surface: {result.diagnostics.surface_kind.value}")
+    print(result.diagnostics.message)
+    if result.output_path is not None:
+        print(f"Unwrap saved to: {result.output_path}")
+    if result.diagnostics.recommendation:
+        print(f"Recommendation: {result.diagnostics.recommendation}")
+    return 0 if result.diagnostics.status in {UnwrapStatus.OK, UnwrapStatus.PARTIAL_SURFACE} else 2
+
+
 def export_config_command(args: argparse.Namespace) -> int:
     PanoramaConfig().save(args.output_path)
     print(f"Config saved to: {args.output_path}")
@@ -208,6 +230,18 @@ def create_parser() -> argparse.ArgumentParser:
     build.add_argument("--no-sampling-fallback", action="store_true")
     build.add_argument("--fallback-sampling-step", type=int)
     build.set_defaults(func=build_command)
+
+    unwrap = subparsers.add_parser("unwrap", help="Build a surface map from video")
+    unwrap.add_argument("video_path")
+    unwrap.add_argument("output_path")
+    unwrap.add_argument("--surface", dest="surface_kind", choices=[kind.value for kind in SurfaceKind], default="auto")
+    unwrap.add_argument("--allow-partial", action="store_true")
+    unwrap.add_argument("--sampling-step", type=int, default=12)
+    unwrap.add_argument("--max-frames", type=int, default=48)
+    unwrap.add_argument("--min-coverage", type=float, default=0.90)
+    unwrap.add_argument("--output-width", type=int, default=1536)
+    unwrap.add_argument("--output-height", type=int, default=512)
+    unwrap.set_defaults(func=unwrap_command)
 
     inspect_video = subparsers.add_parser("inspect-video", help="Inspect video metadata")
     inspect_video.add_argument("video_path")
