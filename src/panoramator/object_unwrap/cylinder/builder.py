@@ -5,6 +5,8 @@ import numpy as np
 
 from ..analyzer import AnalyzedFrame
 from ..coverage import coverage_fraction, least_covered_seam
+from ..image_pose_graph import build_image_pose_graph
+from ..planar_mosaic import build_planar_mosaic
 from ..models import SurfaceModel, UnwrapConfig
 from .fitting import fit_cylinder
 from .mapper import angular_increment, central_band, feature_shift, flow_angular_increment, horizontal_shift, normalized_wall
@@ -18,6 +20,8 @@ class CylinderUnwrapBuilder:
         np.ndarray, np.ndarray, SurfaceModel, dict[str, float | int | str | list[float] | list[int]], dict[str, object]
     ]:
         fit = fit_cylinder(frames)
+        image_pose_graph = build_image_pose_graph(frames)
+        planar_mosaic = build_planar_mosaic(frames, image_pose_graph.edges, config.output_height)
         fragments = [
             central_band(*normalized_wall(item.frame.image, item.mask, item.bbox, config.output_height), config.central_band_ratio)
             for item in frames
@@ -134,7 +138,11 @@ class CylinderUnwrapBuilder:
             "source": source_map,
             "reprojection_error": np.clip(local_error, 0, 255).astype(np.uint8),
             "pose_pairs": pose_pairs,
+            "image_pose_graph": image_pose_graph.edges,
         }
+        if planar_mosaic is not None:
+            mosaic, mosaic_coverage, mosaic_source, mosaic_error = planar_mosaic
+            artifacts.update({"mosaic": mosaic, "mosaic_coverage": mosaic_coverage, "mosaic_source": mosaic_source, "mosaic_error": mosaic_error})
         return canvas, coverage, fit.model, {
             "coverage_fraction": coverage_fraction(coverage),
             "surface_coverage_fraction": min(1.0, angle_span / (2.0 * np.pi)),
@@ -154,6 +162,9 @@ class CylinderUnwrapBuilder:
             ),
             "mapping": "surface_angle_height",
             "rendering": "feature_mosaic_then_global_rectification" if trajectory is not None else "experimental_frame_projection",
+            "image_pose_graph_edges": len(image_pose_graph.edges),
+            "image_pose_graph_valid_edges": image_pose_graph.valid_edges,
+            "planar_mosaic_available": int(planar_mosaic is not None),
         }, artifacts
 
     @staticmethod

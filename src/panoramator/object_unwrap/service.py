@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import cv2
 import numpy as np
@@ -67,14 +68,23 @@ class ObjectUnwrapper:
                 or measurements.get("repeated_observation_detected") == 1
             )
         )
+        planar_mosaic = artifacts.get("mosaic")
+        planar_coverage = artifacts.get("mosaic_coverage")
+        has_planar_fallback = isinstance(planar_mosaic, np.ndarray) and isinstance(planar_coverage, np.ndarray)
         if not self.config.enable_global_pose_optimization:
             status = UnwrapStatus.PARTIAL_SURFACE
             message = "The experimental renderer was used without a global pose quality gate."
             recommendation = "Enable global pose optimization before accepting a complete surface map."
         elif geometry_rejected:
-            status = UnwrapStatus.UNSTABLE_CAMERA_GEOMETRY
-            message = "The tracked views do not agree on one stable surface trajectory."
-            recommendation = "Record a slower orbit with more overlap and less camera shake."
+            if has_planar_fallback:
+                image, coverage = cast(np.ndarray, planar_mosaic), cast(np.ndarray, planar_coverage)
+                status = UnwrapStatus.PARTIAL_SURFACE
+                message = "A connected image-space mosaic is available, but the cylindrical surface trajectory is not confirmed."
+                recommendation = "Use this partial observed band, or record a slower closed orbit for a cylindrical atlas."
+            else:
+                status = UnwrapStatus.UNSTABLE_CAMERA_GEOMETRY
+                message = "The tracked views do not agree on one stable surface trajectory."
+                recommendation = "Record a slower orbit with more overlap and less camera shake."
         elif fallback:
             status = UnwrapStatus.PARTIAL_SURFACE
             message = "Only the observed side band is available; a mesh UV reconstruction is not sufficiently supported by the video."

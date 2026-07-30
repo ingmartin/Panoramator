@@ -11,6 +11,7 @@ from panoramator.object_unwrap.coverage import least_covered_seam
 from panoramator.object_unwrap.cylinder.builder import CylinderUnwrapBuilder
 from panoramator.object_unwrap.cylinder.pose import solve_monotonic_trajectory
 from panoramator.object_unwrap.diagnostics import write_artifacts
+from panoramator.object_unwrap.image_pose_graph import build_image_pose_graph
 from panoramator.object_unwrap.models import SurfaceKind, UnwrapConfig, UnwrapDiagnostics, UnwrapStatus
 
 
@@ -78,3 +79,21 @@ def test_monotonic_trajectory_rejects_reversed_outlier_without_reordering_frames
 def test_unwrap_config_limits_source_map_frame_ids() -> None:
     with np.testing.assert_raises_regex(ValueError, "65535"):
         UnwrapConfig(max_frames=65_536).validate()
+
+
+def test_image_pose_graph_marks_surface_supported_translation() -> None:
+    base = np.zeros((100, 120, 3), np.uint8)
+    for x in range(18, 100, 16):
+        for y in range(18, 86, 16):
+            cv2.circle(base, (x, y), 4, (40 + x, 120, 220 - y), -1)
+    shifted = np.roll(base, 6, axis=1)
+    mask = np.full((100, 120), 255, np.uint8)
+    frames = [
+        AnalyzedFrame(Frame(0, 0.0, base), mask, 100.0, (0, 0, 120, 100)),
+        AnalyzedFrame(Frame(1, 1.0, shifted), mask, 100.0, (0, 0, 120, 100)),
+    ]
+    graph = build_image_pose_graph(frames)
+
+    assert len(graph.edges) == 1
+    assert graph.edges[0]["reason"] == "ok"
+    assert graph.edges[0]["surface_inliers"] >= 8
