@@ -54,15 +54,24 @@ class ObjectUnwrapper:
         measurements["frame_count"] = len(analysis.frames)
         selected = [item.frame.index for item in analysis.frames]
         pose_residual = measurements.get("pose_residual_radians")
+        accepted_pairs = measurements.get("accepted_pose_pairs")
+        required_pairs = max(2, int(np.ceil((len(analysis.frames) - 1) * self.config.min_accepted_pose_pair_fraction)))
         geometry_rejected = (
             self.config.enable_global_pose_optimization
             and (
                 not isinstance(pose_residual, (int, float))
                 or not np.isfinite(pose_residual)
                 or pose_residual > self.config.max_pose_residual_radians
+                or not isinstance(accepted_pairs, int)
+                or accepted_pairs < required_pairs
+                or measurements.get("repeated_observation_detected") == 1
             )
         )
-        if geometry_rejected:
+        if not self.config.enable_global_pose_optimization:
+            status = UnwrapStatus.PARTIAL_SURFACE
+            message = "The experimental renderer was used without a global pose quality gate."
+            recommendation = "Enable global pose optimization before accepting a complete surface map."
+        elif geometry_rejected:
             status = UnwrapStatus.UNSTABLE_CAMERA_GEOMETRY
             message = "The tracked views do not agree on one stable surface trajectory."
             recommendation = "Record a slower orbit with more overlap and less camera shake."

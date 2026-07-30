@@ -37,6 +37,7 @@ def test_cylinder_builder_creates_alpha_coverage_and_low_coverage_seam() -> None
     assert least_covered_seam(coverage) == 0
     assert artifacts["source"].shape == coverage.shape
     assert artifacts["reprojection_error"].shape == coverage.shape
+    assert measurements["rendering"] == "feature_mosaic_then_global_rectification"
 
 
 def test_artifacts_keep_png_in_diagnostic_file_list(tmp_path) -> None:
@@ -70,6 +71,8 @@ def test_monotonic_trajectory_rejects_reversed_outlier_without_reordering_frames
     assert all(right >= left for left, right in zip(trajectory.angles, trajectory.angles[1:]))
     assert trajectory.accepted_pairs == 3
     assert trajectory.repeated_observation is False
+    assert trajectory.steps[2] == 0.0
+    assert trajectory.rejection_reasons[2] == "reversed_motion"
 
 
 def test_unwrap_config_limits_source_map_frame_ids() -> None:

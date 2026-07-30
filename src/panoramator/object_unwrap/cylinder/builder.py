@@ -14,7 +14,9 @@ from .pose import solve_monotonic_trajectory
 class CylinderUnwrapBuilder:
     def build(
         self, frames: list[AnalyzedFrame], config: UnwrapConfig
-    ) -> tuple[np.ndarray, np.ndarray, SurfaceModel, dict[str, float | int | str | list[float] | list[int]], dict[str, np.ndarray]]:
+    ) -> tuple[
+        np.ndarray, np.ndarray, SurfaceModel, dict[str, float | int | str | list[float] | list[int]], dict[str, object]
+    ]:
         fit = fit_cylinder(frames)
         fragments = [
             central_band(*normalized_wall(item.frame.image, item.mask, item.bbox, config.output_height), config.central_band_ratio)
@@ -53,6 +55,7 @@ class CylinderUnwrapBuilder:
             for step in steps:
                 angles.append(angles[-1] + step)
             pose_residual = 0.0
+            trajectory = None
         min_angle = min(angles) - half_view_angle
         max_angle = max(angles) + half_view_angle
         angle_span = max(max_angle - min_angle, 1e-6)
@@ -102,14 +105,35 @@ class CylinderUnwrapBuilder:
                 weights[replace, target_x] = column_weights[target_x]
                 source_map[replace, target_x] = frame_offset
         coverage = np.where(weights > 0, 255, 0).astype(np.uint8)
+        if trajectory is not None and trajectory.accepted_pairs:
+            # The per-frame cylindrical remap above is retained only as a
+            # diagnostic fallback.  A pose-validated result is composed first
+            # as one mask-aware feature mosaic; it is not a row of unrelated
+            # source strips warped independently into the final atlas.
+            canvas, coverage, source_map, reprojection_error = self._feature_mosaic(
+                fragments, angles, min_angle, angle_span, atlas_width
+            )
+            local_error = reprojection_error.astype(np.float32)
         seam = least_covered_seam(coverage)
         # Preserve chronological orientation: x=0 corresponds to the first
         # observation.  Moving the seam is a presentation choice and must not
         # silently reorder the surface sequence.
         fit.model.seam_angle_degrees = seam / atlas_width * angle_span / (2 * np.pi) * 360.0
-        artifacts: dict[str, np.ndarray] = {
+        pose_pairs = [
+            {
+                "left_frame": frames[index].frame.index,
+                "right_frame": frames[index + 1].frame.index,
+                "delta_radians": float(delta),
+                "confidence": float(confidence),
+                "accepted": bool(trajectory.accepted[index]) if trajectory else False,
+                "rejection_reason": trajectory.rejection_reasons[index] if trajectory else "global_pose_disabled",
+            }
+            for index, (delta, confidence) in enumerate(observations)
+        ]
+        artifacts: dict[str, object] = {
             "source": source_map,
             "reprojection_error": np.clip(local_error, 0, 255).astype(np.uint8),
+            "pose_pairs": pose_pairs,
         }
         return canvas, coverage, fit.model, {
             "coverage_fraction": coverage_fraction(coverage),
@@ -120,15 +144,66 @@ class CylinderUnwrapBuilder:
             "match_response": responses,
             "angular_steps": steps,
             "pose_residual_radians": pose_residual,
-            "accepted_pose_pairs": (trajectory.accepted_pairs if config.enable_global_pose_optimization else 0),
+            "accepted_pose_pairs": (trajectory.accepted_pairs if trajectory else 0),
+            "rejected_pose_pairs": (len(observations) - trajectory.accepted_pairs if trajectory else len(observations)),
             "trajectory_sweep_degrees": (
-                trajectory.sweep_radians / (2.0 * np.pi) * 360.0 if config.enable_global_pose_optimization else 0.0
+                trajectory.sweep_radians / (2.0 * np.pi) * 360.0 if trajectory else 0.0
             ),
             "repeated_observation_detected": (
-                int(trajectory.repeated_observation) if config.enable_global_pose_optimization else 0
+                int(trajectory.repeated_observation) if trajectory else 0
             ),
             "mapping": "surface_angle_height",
+            "rendering": "feature_mosaic_then_global_rectification" if trajectory is not None else "experimental_frame_projection",
         }, artifacts
+
+    @staticmethod
+    def _feature_mosaic(
+        fragments: list[tuple[np.ndarray, np.ndarray]],
+        angles: list[float],
+        min_angle: float,
+        angle_span: float,
+        atlas_width: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Compose the observed central bands in one common angular canvas.
+
+        This is deliberately an affine-free *single* surface coordinate system:
+        the accepted global angles choose a centre for each feature patch, and
+        masks/feather weights resolve overlap.  Thus an invalid pair cannot
+        create a thin independently projected strip in the published result.
+        """
+        height = fragments[0][0].shape[0]
+        accum = np.zeros((height, atlas_width, 3), np.float32)
+        total_weight = np.zeros((height, atlas_width), np.float32)
+        owner_weight = np.zeros((height, atlas_width), np.float32)
+        source = np.zeros((height, atlas_width), np.uint16)
+        error = np.zeros((height, atlas_width), np.float32)
+        for index, ((image, mask), angle) in enumerate(zip(fragments, angles, strict=True), start=1):
+            width = image.shape[1]
+            centre = int(round((angle - min_angle) / max(angle_span, 1e-9) * (atlas_width - 1)))
+            left, right = max(0, centre - width // 2), min(atlas_width, centre - width // 2 + width)
+            source_left, source_right = left - (centre - width // 2), right - (centre - width // 2)
+            patch = image[:, source_left:source_right]
+            valid = mask[:, source_left:source_right] > 0
+            if not np.any(valid):
+                continue
+            horizontal = np.minimum(np.arange(source_left, source_right) + 1, width - np.arange(source_left, source_right))
+            feather = np.clip(horizontal / max(width * 0.18, 1.0), 0.03, 1.0).astype(np.float32)
+            weight = valid.astype(np.float32) * feather[None, :]
+            old = total_weight[:, left:right] > 0
+            difference = np.mean(np.abs(accum[:, left:right] / np.maximum(total_weight[:, left:right, None], 1e-6) - patch), axis=2)
+            error_region = error[:, left:right]
+            conflict = old & valid
+            error_region[conflict] = np.maximum(error_region[conflict], difference[conflict])
+            accum[:, left:right] += patch.astype(np.float32) * weight[..., None]
+            total_weight[:, left:right] += weight
+            owner_region = owner_weight[:, left:right]
+            source_region = source[:, left:right]
+            replace = weight > owner_region
+            source_region[replace] = index
+            owner_region[replace] = weight[replace]
+        canvas = np.clip(accum / np.maximum(total_weight[..., None], 1e-6), 0, 255).astype(np.uint8)
+        coverage = np.where(total_weight > 0, 255, 0).astype(np.uint8)
+        return canvas, coverage, source, np.clip(error, 0, 255).astype(np.uint8)
 
     @staticmethod
     def _atlas_width(boxes: list[tuple[int, int, int, int]], angle_span: float, config: UnwrapConfig) -> tuple[int, float]:

@@ -76,7 +76,8 @@ class UnwrapConfig:
     output_width: int = 1536
     central_band_ratio: float = 0.55
     max_pose_residual_radians: float = 0.08
-    enable_global_pose_optimization: bool = False
+    enable_global_pose_optimization: bool = True
+    min_accepted_pose_pair_fraction: float = 0.60
 
     def validate(self) -> None:
         self.surface_kind = SurfaceKind(self.surface_kind)
@@ -92,3 +93,5 @@ class UnwrapConfig:
             raise ValueError("central_band_ratio must be between 0.2 and 1.0")
         if self.max_pose_residual_radians <= 0:
             raise ValueError("max_pose_residual_radians must be > 0")
+        if not 0 < self.min_accepted_pose_pair_fraction <= 1:
+            raise ValueError("min_accepted_pose_pair_fraction must be between 0 and 1")
