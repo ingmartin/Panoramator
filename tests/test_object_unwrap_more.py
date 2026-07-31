@@ -106,11 +106,11 @@ def test_analyzer_temporal_decimation_rejects_near_duplicate_frames(monkeypatch:
 
     assert analysis.status is None
     assert [item.frame.index for item in analysis.frames] == [0, 2]
-    assert analysis.measurements == {
-        "temporal_decimation_applied": 1,
-        "temporal_decimation_kept_frames": 2,
-        "temporal_decimation_rejected_frames": 1,
-    }
+    assert analysis.measurements is not None
+    assert analysis.measurements["temporal_decimation_applied"] == 1
+    assert analysis.measurements["temporal_decimation_kept_frames"] == 2
+    assert analysis.measurements["temporal_decimation_rejected_frames"] == 1
+    assert analysis.measurements["temporal_decimation_observed_detail"] >= 0.0
     assert analysis.rejected_frames is not None
     assert analysis.rejected_frames[0]["frame_index"] == 1
     assert analysis.rejected_frames[0]["reason"] == "temporal_decimation_near_duplicate"
@@ -133,6 +133,84 @@ def test_analyzer_can_disable_temporal_decimation(monkeypatch: pytest.MonkeyPatc
         "temporal_decimation_kept_frames": 3,
         "temporal_decimation_rejected_frames": 0,
     }
+
+
+def test_analyzer_temporal_decimation_rejects_low_surface_contribution(monkeypatch: pytest.MonkeyPatch) -> None:
+    base = np.full((24, 24, 3), 120, np.uint8)
+    base[:, 4:20] = (80, 140, 220)
+    shifted = base.copy()
+    shifted[:, 5:21] = (82, 138, 218)
+    frames = [
+        Frame(0, 0.0, base.copy()),
+        Frame(1, 1.0, shifted.copy()),
+        Frame(2, 2.0, np.roll(base, 10, axis=1)),
+    ]
+    monkeypatch.setattr(analyzer_module, "object_mask", lambda image, minimum: np.ones((24, 24), np.uint8) * 255)
+    monkeypatch.setattr(analyzer_module, "stable_surface_bbox", lambda mask: (2, 2, 20, 20))
+    monkeypatch.setattr(analyzer_module, "publish_surface_mask", lambda mask, bbox: mask.copy())
+    monkeypatch.setattr(analyzer_module, "masked_sharpness", lambda image, mask: 50.0)
+
+    analysis = VideoAnalyzer().analyze(
+        frames,
+        UnwrapConfig(
+            temporal_decimation_max_mask_iou=0.99,
+            temporal_decimation_min_band_difference=0.0,
+            temporal_decimation_min_bbox_shift=0.0,
+            temporal_decimation_min_new_mask_fraction=0.05,
+            temporal_decimation_min_detail_gain=0.02,
+        ),
+    )
+
+    assert analysis.status is None
+    assert [item.frame.index for item in analysis.frames] == [0, 2]
+    assert analysis.rejected_frames is not None
+    assert analysis.rejected_frames[0]["reason"] == "temporal_decimation_low_surface_contribution"
+    assert analysis.rejected_frames[0]["new_mask_fraction"] < 0.05
+
+
+def test_analyzer_temporal_decimation_keeps_frame_with_new_detail_contribution(monkeypatch: pytest.MonkeyPatch) -> None:
+    base = np.full((24, 24, 3), 110, np.uint8)
+    base[:, 4:20] = 160
+    detailed = base.copy()
+    detailed[:, 18:24] = 240
+    frames = [
+        Frame(0, 0.0, base.copy()),
+        Frame(1, 1.0, detailed.copy()),
+        Frame(2, 2.0, np.roll(detailed, 6, axis=1)),
+    ]
+    masks = [
+        np.pad(np.ones((24, 18), np.uint8) * 255, ((0, 0), (0, 6))),
+        np.ones((24, 24), np.uint8) * 255,
+        np.ones((24, 24), np.uint8) * 255,
+    ]
+    state = {"index": 0}
+
+    def fake_object_mask(image, minimum):
+        mask = masks[state["index"]]
+        state["index"] += 1
+        return mask
+
+    monkeypatch.setattr(analyzer_module, "object_mask", fake_object_mask)
+    monkeypatch.setattr(analyzer_module, "stable_surface_bbox", lambda mask: (0, 0, mask.shape[1], mask.shape[0]))
+    monkeypatch.setattr(analyzer_module, "publish_surface_mask", lambda mask, bbox: mask.copy())
+    monkeypatch.setattr(analyzer_module, "masked_sharpness", lambda image, mask: 50.0)
+
+    analysis = VideoAnalyzer().analyze(
+        frames,
+        UnwrapConfig(
+            temporal_decimation_max_mask_iou=1.0,
+            temporal_decimation_min_band_difference=1.0,
+            temporal_decimation_min_bbox_shift=1.0,
+            temporal_decimation_min_new_mask_fraction=0.05,
+            temporal_decimation_min_detail_gain=0.005,
+        ),
+    )
+
+    assert analysis.status is None
+    assert [item.frame.index for item in analysis.frames] == [0, 1]
+    assert analysis.rejected_frames is not None
+    assert analysis.rejected_frames[0]["frame_index"] == 2
+    assert analysis.rejected_frames[0]["reason"] == "temporal_decimation_near_duplicate"
 
 
 def test_surface_utility_functions_cover_empty_and_valid_geometry() -> None:
@@ -694,10 +772,101 @@ def test_unwrapper_photo_mode_rejects_excessive_crop_loss(monkeypatch: pytest.Mo
     ).unwrap_video("input.mp4", output)
 
     saved = cv2.imread(str(output), cv2.IMREAD_UNCHANGED)
-    assert saved.shape[:2] == (8, 12)
+    assert saved.shape[:2] == (6, 10)
     assert result.diagnostics.measurements["photo_mode_eligible"] == 1
     assert result.diagnostics.measurements["photo_mode_applied"] == 0
     assert result.diagnostics.measurements["photo_mode_crop_policy"] == "bounding_fallback_excessive_inscribed_loss"
+
+
+def test_unwrapper_crop_result_removes_outer_transparent_fields(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from panoramator.object_unwrap import service
+
+    class FakeSource:
+        def __init__(self, *args) -> None:
+            pass
+
+        def open(self) -> None:
+            return None
+
+        def iter_frames(self):
+            return [Frame(0, 0.0, np.zeros((8, 8, 3), np.uint8)), Frame(1, 1.0, np.zeros((8, 8, 3), np.uint8))]
+
+        def close(self) -> None:
+            return None
+
+    analyzed = [_analyzed_frame(0), _analyzed_frame(1)]
+    monkeypatch.setattr(service, "OpenCVVideoSource", FakeSource)
+    monkeypatch.setattr(service.VideoAnalyzer, "analyze", lambda self, frames, config: Analysis(analyzed, SurfaceKind.CYLINDRICAL))
+    coverage = np.zeros((8, 12), np.uint8)
+    coverage[2:6, 3:9] = 255
+    monkeypatch.setattr(
+        service.CylinderUnwrapBuilder,
+        "build",
+        lambda self, frames, config: (
+            np.full((8, 12, 3), 120, np.uint8),
+            coverage.copy(),
+            SurfaceModel(SurfaceKind.CYLINDRICAL),
+            {"surface_coverage_fraction": 1.0, "pose_residual_radians": 0.01, "accepted_pose_pairs": 2, "quality_gate_passed": 1, "rectification_applied": 1},
+            {},
+        ),
+    )
+
+    output = tmp_path / "surface.png"
+    result = ObjectUnwrapper(
+        UnwrapConfig(min_accepted_pose_pair_fraction=1.0, allow_partial=True, crop_result=True)
+    ).unwrap_video("input.mp4", output)
+
+    saved = cv2.imread(str(output), cv2.IMREAD_UNCHANGED)
+    assert saved.shape[:2] == (4, 6)
+    assert np.all(saved[:, :, 3] == 255)
+    assert result.diagnostics.measurements["crop_result_applied"] == 1
+    assert result.diagnostics.measurements["crop_result_policy"] == "preserve_alpha"
+
+
+def test_unwrapper_crop_result_preserves_internal_transparency(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from panoramator.object_unwrap import service
+
+    class FakeSource:
+        def __init__(self, *args) -> None:
+            pass
+
+        def open(self) -> None:
+            return None
+
+        def iter_frames(self):
+            return [Frame(0, 0.0, np.zeros((8, 8, 3), np.uint8)), Frame(1, 1.0, np.zeros((8, 8, 3), np.uint8))]
+
+        def close(self) -> None:
+            return None
+
+    analyzed = [_analyzed_frame(0), _analyzed_frame(1)]
+    monkeypatch.setattr(service, "OpenCVVideoSource", FakeSource)
+    monkeypatch.setattr(service.VideoAnalyzer, "analyze", lambda self, frames, config: Analysis(analyzed, SurfaceKind.CYLINDRICAL))
+    coverage = np.zeros((8, 12), np.uint8)
+    coverage[1:7, 2:10] = 255
+    coverage[3:5, 5:7] = 0
+    monkeypatch.setattr(
+        service.CylinderUnwrapBuilder,
+        "build",
+        lambda self, frames, config: (
+            np.full((8, 12, 3), 120, np.uint8),
+            coverage.copy(),
+            SurfaceModel(SurfaceKind.CYLINDRICAL),
+            {"surface_coverage_fraction": 1.0, "pose_residual_radians": 0.01, "accepted_pose_pairs": 2, "quality_gate_passed": 1, "rectification_applied": 1},
+            {},
+        ),
+    )
+
+    output = tmp_path / "surface.png"
+    ObjectUnwrapper(UnwrapConfig(min_accepted_pose_pair_fraction=1.0, allow_partial=True, crop_result=True)).unwrap_video(
+        "input.mp4",
+        output,
+    )
+
+    saved = cv2.imread(str(output), cv2.IMREAD_UNCHANGED)
+    assert saved.shape[:2] == (6, 8)
+    assert np.any(saved[:, :, 3] == 0)
+    assert np.any(saved[:, :, 3] == 255)
 
 
 def test_unwrapper_uses_planar_fallback_when_geometry_is_not_confirmed(
@@ -1031,6 +1200,139 @@ def test_planar_mosaic_prefers_stronger_overlap_and_records_conflict_error() -> 
     assert np.all(owner == 2)
     assert np.all(image == 180)
     assert int(error.max()) > 0
+
+
+def test_planar_mosaic_keeps_existing_owner_on_high_detail_conflict_without_clear_gain() -> None:
+    left = np.full((16, 16, 3), 220, np.uint8)
+    right = left.copy()
+    left[:, 7:9] = 10
+    right[:, 6:8] = 10
+    mask = np.full((16, 16), 255, np.uint8)
+    frames = [
+        AnalyzedFrame(Frame(0, 0.0, left), mask, mask.copy(), 1.0, (0, 0, 16, 16)),
+        AnalyzedFrame(Frame(1, 1.0, right), mask, mask.copy(), 1.02, (0, 0, 16, 16)),
+    ]
+    edges = [
+        {
+            "left_frame": 0,
+            "right_frame": 1,
+            "reason": "ok",
+            "a00": 1.0,
+            "a01": 0.0,
+            "a02": 0.0,
+            "a10": 0.0,
+            "a11": 1.0,
+            "a12": 0.0,
+        }
+    ]
+
+    mosaic = build_planar_mosaic(frames, edges, output_height=16)
+
+    assert mosaic is not None
+    image, coverage, owner, error = mosaic
+    assert np.all(coverage == 255)
+    assert np.all(owner[:, 8] == 1)
+    assert np.all(image[:, 8] == 10)
+    assert np.all(owner[:, 7] != 0)
+    assert int(error[:, 6:9].max()) > 0
+
+
+def test_planar_mosaic_replaces_owner_when_gain_is_clear_on_smooth_region() -> None:
+    left = np.full((12, 12, 3), 40, np.uint8)
+    right = np.full((12, 12, 3), 200, np.uint8)
+    mask = np.full((12, 12), 255, np.uint8)
+    frames = [
+        AnalyzedFrame(Frame(0, 0.0, left), mask, mask.copy(), 1.0, (0, 0, 12, 12)),
+        AnalyzedFrame(Frame(1, 1.0, right), mask, mask.copy(), 4.0, (0, 0, 12, 12)),
+    ]
+    edges = [
+        {
+            "left_frame": 0,
+            "right_frame": 1,
+            "reason": "ok",
+            "a00": 1.0,
+            "a01": 0.0,
+            "a02": 0.0,
+            "a10": 0.0,
+            "a11": 1.0,
+            "a12": 0.0,
+        }
+    ]
+
+    mosaic = build_planar_mosaic(frames, edges, output_height=12)
+
+    assert mosaic is not None
+    image, coverage, owner, _error = mosaic
+    assert np.all(coverage == 255)
+    assert np.all(owner == 2)
+    assert np.all(image == 200)
+
+
+def test_planar_mosaic_prefers_existing_owner_inside_stable_detail_patch() -> None:
+    left = np.full((18, 18, 3), 210, np.uint8)
+    right = left.copy()
+    left[:, 8:10] = 0
+    right[:, 7:9] = 0
+    mask = np.full((18, 18), 255, np.uint8)
+    frames = [
+        AnalyzedFrame(Frame(0, 0.0, left), mask, mask.copy(), 1.0, (0, 0, 18, 18)),
+        AnalyzedFrame(Frame(1, 1.0, right), mask, mask.copy(), 1.05, (0, 0, 18, 18)),
+    ]
+    edges = [
+        {
+            "left_frame": 0,
+            "right_frame": 1,
+            "reason": "ok",
+            "a00": 1.0,
+            "a01": 0.0,
+            "a02": 0.0,
+            "a10": 0.0,
+            "a11": 1.0,
+            "a12": 0.0,
+        }
+    ]
+
+    mosaic = build_planar_mosaic(frames, edges, output_height=18)
+
+    assert mosaic is not None
+    image, coverage, owner, _error = mosaic
+    assert np.all(coverage == 255)
+    assert np.all(owner[:, 9] == 1)
+    assert np.all(image[:, 9] == 0)
+
+
+def test_planar_mosaic_allows_owner_change_near_existing_conflict_boundary() -> None:
+    left = np.full((16, 20, 3), 90, np.uint8)
+    right = np.full((16, 20, 3), 220, np.uint8)
+    left[:, 4:7] = 30
+    right[:, 6:9] = 240
+    mask = np.full((16, 20), 255, np.uint8)
+    frames = [
+        AnalyzedFrame(Frame(0, 0.0, left), mask, mask.copy(), 1.0, (0, 0, 20, 16)),
+        AnalyzedFrame(Frame(1, 1.0, right), mask, mask.copy(), 2.5, (0, 0, 20, 16)),
+    ]
+    edges = [
+        {
+            "left_frame": 0,
+            "right_frame": 1,
+            "reason": "ok",
+            "a00": 1.0,
+            "a01": 0.0,
+            "a02": 0.0,
+            "a10": 0.0,
+            "a11": 1.0,
+            "a12": 0.0,
+        }
+    ]
+
+    mosaic = build_planar_mosaic(frames, edges, output_height=16)
+
+    assert mosaic is not None
+    image, coverage, owner, error = mosaic
+    assert np.all(coverage == 255)
+    assert np.all(owner[:, 7:9] == 2)
+    assert np.all(image[:, 7:9] == 240)
+    assert int(error[:, 6:9].max()) > 0
 
 
 def test_planar_mosaic_requires_a_connected_edge_chain() -> None:

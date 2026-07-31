@@ -169,6 +169,18 @@ class ObjectUnwrapper:
                 measurements["photo_mode_applied"] = 0
                 measurements["photo_mode_crop_policy"] = "skipped_ineligible"
                 measurements["photo_mode_crop_loss"] = 0.0
+        if self.config.crop_result:
+            bgra, crop_policy, crop_loss = crop_with_policy(
+                bgra,
+                coverage,
+                "preserve_alpha",
+                max_inscribed_loss=1.0,
+                max_inscribed_width_loss=1.0,
+            )
+            coverage = bgra[:, :, 3].copy()
+            measurements["crop_result_applied"] = 1
+            measurements["crop_result_policy"] = crop_policy
+            measurements["crop_result_loss"] = float(crop_loss)
         output.parent.mkdir(parents=True, exist_ok=True)
         if output.suffix.lower() not in {".png", ".webp", ".tiff"}:
             raise ValueError("object unwrap output must support alpha: PNG, WebP, or TIFF")

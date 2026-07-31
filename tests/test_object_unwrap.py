@@ -94,6 +94,7 @@ def test_unwrap_config_json_round_trip_normalizes_surface_kind(tmp_path) -> None
         surface_kind=SurfaceKind.CYLINDRICAL,
         allow_partial=True,
         photo_mode=True,
+        crop_result=True,
         photo_crop_max_loss=0.25,
         photo_crop_max_width_loss=0.2,
     )
@@ -115,6 +116,8 @@ def test_unwrap_config_json_round_trip_normalizes_surface_kind(tmp_path) -> None
         ({"photo_crop_max_width_loss": 1.1}, "photo_crop_max_width_loss must be between 0 and 1"),
         ({"max_mosaic_anchor_conflict_footprint": -0.1}, "max_mosaic_anchor_conflict_footprint must be between 0 and 1"),
         ({"max_mosaic_owner_instability": 1.1}, "max_mosaic_owner_instability must be between 0 and 1"),
+        ({"temporal_decimation_min_new_mask_fraction": 1.1}, "temporal_decimation_min_new_mask_fraction must be between 0 and 1"),
+        ({"temporal_decimation_min_detail_gain": -0.1}, "temporal_decimation_min_detail_gain must be between 0 and 1"),
     ],
 )
 def test_unwrap_config_rejects_invalid_photo_mode_crop_thresholds(settings: dict[str, float], message: str) -> None:

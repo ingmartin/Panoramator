@@ -22,6 +22,10 @@ def crop_with_policy(
         alpha = mask[y : y + height, x : x + width]
         if bounding.ndim == 3 and bounding.shape[2] == 3:
             return np.dstack((bounding, alpha)), policy, 0.0
+        if bounding.ndim == 3 and bounding.shape[2] == 4:
+            result = bounding.copy()
+            result[:, :, 3] = alpha
+            return result, policy, 0.0
         return bounding, "bounding", 0.0
 
     bounding = crop_black_borders(image, visible_mask)

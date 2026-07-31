@@ -86,11 +86,15 @@ class VideoAnalyzer:
         selected = [frames[0]]
         rejected: list[dict[str, float | int | str]] = []
         last_thumbnail, last_mask = _band_thumbnail(frames[0])
+        observed_mask = last_mask.copy()
+        observed_detail = _detail_energy(last_thumbnail, last_mask)
         for item in frames[1:]:
             thumbnail, mask = _band_thumbnail(item)
             mask_iou = _mask_iou(last_mask, mask)
             band_difference = _band_difference(last_thumbnail, last_mask, thumbnail, mask)
             bbox_shift = _bbox_shift_ratio(selected[-1].bbox, item.bbox)
+            new_mask_fraction = _new_mask_fraction(observed_mask, mask)
+            detail_gain = _detail_gain(thumbnail, mask, observed_mask)
             if (
                 mask_iou >= config.temporal_decimation_max_mask_iou
                 and band_difference <= config.temporal_decimation_min_band_difference
@@ -104,11 +108,32 @@ class VideoAnalyzer:
                         "mask_iou": mask_iou,
                         "band_difference": band_difference,
                         "bbox_shift_ratio": bbox_shift,
+                        "new_mask_fraction": new_mask_fraction,
+                        "detail_gain": detail_gain,
+                    }
+                )
+                continue
+            if (
+                new_mask_fraction < config.temporal_decimation_min_new_mask_fraction
+                and detail_gain < config.temporal_decimation_min_detail_gain
+            ):
+                rejected.append(
+                    {
+                        "frame_index": item.frame.index,
+                        "timestamp_seconds": item.frame.timestamp_seconds,
+                        "reason": "temporal_decimation_low_surface_contribution",
+                        "mask_iou": mask_iou,
+                        "band_difference": band_difference,
+                        "bbox_shift_ratio": bbox_shift,
+                        "new_mask_fraction": new_mask_fraction,
+                        "detail_gain": detail_gain,
                     }
                 )
                 continue
             selected.append(item)
             last_thumbnail, last_mask = thumbnail, mask
+            observed_mask |= mask
+            observed_detail += detail_gain
         if len(selected) < 2 and len(frames) >= 2:
             selected = [frames[0], frames[-1]]
             rejected = rejected[:-1] if rejected else rejected
@@ -116,6 +141,7 @@ class VideoAnalyzer:
             "temporal_decimation_applied": 1,
             "temporal_decimation_kept_frames": len(selected),
             "temporal_decimation_rejected_frames": len(rejected),
+            "temporal_decimation_observed_detail": round(float(observed_detail), 6),
         }
 
 
@@ -149,3 +175,30 @@ def _bbox_shift_ratio(left: tuple[int, int, int, int], right: tuple[int, int, in
     right_center = right[0] + right[2] * 0.5
     mean_width = max((left[2] + right[2]) * 0.5, 1.0)
     return float(abs(right_center - left_center) / mean_width)
+
+
+def _new_mask_fraction(observed_mask: np.ndarray, candidate_mask: np.ndarray) -> float:
+    candidate_pixels = int(np.count_nonzero(candidate_mask))
+    if candidate_pixels == 0:
+        return 0.0
+    new_pixels = candidate_mask & ~observed_mask
+    return float(np.count_nonzero(new_pixels) / candidate_pixels)
+
+
+def _detail_energy(thumbnail: np.ndarray, mask: np.ndarray) -> float:
+    if not np.any(mask):
+        return 0.0
+    gradient_x = cv2.Sobel(thumbnail, cv2.CV_32F, 1, 0, ksize=3)
+    gradient_y = cv2.Sobel(thumbnail, cv2.CV_32F, 0, 1, ksize=3)
+    gradient = cv2.magnitude(gradient_x, gradient_y)
+    return float(np.mean(gradient[mask]) / 255.0)
+
+
+def _detail_gain(thumbnail: np.ndarray, candidate_mask: np.ndarray, observed_mask: np.ndarray) -> float:
+    new_pixels = candidate_mask & ~observed_mask
+    if not np.any(new_pixels):
+        return 0.0
+    gradient_x = cv2.Sobel(thumbnail, cv2.CV_32F, 1, 0, ksize=3)
+    gradient_y = cv2.Sobel(thumbnail, cv2.CV_32F, 0, 1, ksize=3)
+    gradient = cv2.magnitude(gradient_x, gradient_y)
+    return float(np.mean(gradient[new_pixels]) / 255.0)

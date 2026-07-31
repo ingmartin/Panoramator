@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
 import numpy as np
-import json
 
 
 class SurfaceKind(StrEnum):
@@ -81,6 +81,7 @@ class UnwrapConfig:
     output_height: int = 512
     output_width: int = 1536
     save_debug_artifacts: bool = True
+    crop_result: bool = True
     photo_mode: bool = False
     photo_crop_margin_px: int = 3
     photo_crop_max_loss: float = 0.80
@@ -99,6 +100,8 @@ class UnwrapConfig:
     temporal_decimation_max_mask_iou: float = 0.94
     temporal_decimation_min_band_difference: float = 0.05
     temporal_decimation_min_bbox_shift: float = 0.04
+    temporal_decimation_min_new_mask_fraction: float = 0.015
+    temporal_decimation_min_detail_gain: float = 0.01
     min_rectification_column_fraction: float = 0.35
     rectification_smoothing_window: int = 31
     max_rectification_axis_step: float = 12.0
@@ -158,6 +161,10 @@ class UnwrapConfig:
             raise ValueError("temporal_decimation_min_band_difference must be between 0 and 1")
         if self.temporal_decimation_min_bbox_shift < 0:
             raise ValueError("temporal_decimation_min_bbox_shift must be >= 0")
+        if not 0 <= self.temporal_decimation_min_new_mask_fraction <= 1:
+            raise ValueError("temporal_decimation_min_new_mask_fraction must be between 0 and 1")
+        if not 0 <= self.temporal_decimation_min_detail_gain <= 1:
+            raise ValueError("temporal_decimation_min_detail_gain must be between 0 and 1")
         if not 0 < self.min_rectification_column_fraction <= 1:
             raise ValueError("min_rectification_column_fraction must be between 0 and 1")
         if self.rectification_smoothing_window < 3:

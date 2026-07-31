@@ -177,6 +177,8 @@ def unwrap_command(args: argparse.Namespace) -> int:
         config.output_width = args.output_width
     if getattr(args, "output_height", None) is not None:
         config.output_height = args.output_height
+    if getattr(args, "crop_result", False):
+        config.crop_result = True
     if getattr(args, "photo_mode", False):
         config.photo_mode = True
     if getattr(args, "photo_crop_margin_px", None) is not None:
@@ -313,6 +315,7 @@ def create_parser() -> argparse.ArgumentParser:
     unwrap.add_argument("--min-coverage", type=float)
     unwrap.add_argument("--output-width", type=int)
     unwrap.add_argument("--output-height", type=int)
+    unwrap.add_argument("--crop-result", action="store_true")
     unwrap.add_argument("--save-debug-artifacts", action="store_true")
     unwrap.add_argument("--no-save-debug-artifacts", action="store_true")
     unwrap.add_argument("--photo-mode", action="store_true")

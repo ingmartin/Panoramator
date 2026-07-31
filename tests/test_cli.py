@@ -74,6 +74,7 @@ def _unwrap_args(**overrides) -> argparse.Namespace:
         "min_coverage": None,
         "output_width": None,
         "output_height": None,
+        "crop_result": False,
         "photo_mode": False,
         "photo_crop_margin_px": None,
         "photo_crop_max_loss": None,
@@ -258,6 +259,7 @@ def test_unwrap_command_applies_overrides_and_prints_summary(monkeypatch, capsys
         min_coverage=0.85,
         output_width=1200,
         output_height=400,
+        crop_result=True,
         photo_mode=True,
         photo_crop_margin_px=5,
         photo_crop_max_loss=0.2,
@@ -294,6 +296,7 @@ def test_unwrap_command_applies_overrides_and_prints_summary(monkeypatch, capsys
     assert config.min_coverage == 0.85
     assert config.output_width == 1200
     assert config.output_height == 400
+    assert config.crop_result is True
     assert config.photo_mode is True
     assert config.photo_crop_margin_px == 5
     assert config.photo_crop_max_loss == 0.2
@@ -380,7 +383,7 @@ def test_create_parser_routes_supported_subcommands() -> None:
     unwrap_args = parser.parse_args(
         [
             "unwrap", "video.mp4", "out.png", "--config", "unwrap.json", "--sampling-step", "18", "--max-frames", "24",
-            "--blur-threshold", "40", "--min-object-area-ratio", "0.1", "--photo-mode", "--photo-crop-margin-px", "5",
+            "--blur-threshold", "40", "--min-object-area-ratio", "0.1", "--crop-result", "--photo-mode", "--photo-crop-margin-px", "5",
             "--max-mosaic-boundary-mean-error", "52", "--no-save-debug-artifacts",
         ]
     )
@@ -398,6 +401,7 @@ def test_create_parser_routes_supported_subcommands() -> None:
     assert unwrap_args.max_frames == 24
     assert unwrap_args.blur_threshold == 40.0
     assert unwrap_args.min_object_area_ratio == 0.1
+    assert unwrap_args.crop_result is True
     assert unwrap_args.photo_mode is True
     assert unwrap_args.photo_crop_margin_px == 5
     assert unwrap_args.no_save_debug_artifacts is True
