@@ -83,6 +83,8 @@ class UnwrapConfig:
     save_debug_artifacts: bool = True
     photo_mode: bool = False
     photo_crop_margin_px: int = 3
+    photo_crop_max_loss: float = 0.80
+    photo_crop_max_width_loss: float = 0.55
     central_band_ratio: float = 0.55
     max_pose_residual_radians: float = 0.08
     enable_global_pose_optimization: bool = True
@@ -91,6 +93,8 @@ class UnwrapConfig:
     max_mosaic_boundary_severe_fraction: float = 0.72
     mosaic_boundary_severe_error: float = 48.0
     max_mosaic_boundary_severe_footprint: float = 0.04
+    max_mosaic_anchor_conflict_footprint: float = 0.025
+    max_mosaic_owner_instability: float = 0.35
     enable_temporal_decimation: bool = True
     temporal_decimation_max_mask_iou: float = 0.94
     temporal_decimation_min_band_difference: float = 0.05
@@ -102,7 +106,9 @@ class UnwrapConfig:
     @classmethod
     def from_json(cls, path: str | Path) -> UnwrapConfig:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
-        return cls(**data)
+        config = cls(**data)
+        config.validate()
+        return config
 
     def to_dict(self) -> dict:
         result = asdict(self)
@@ -124,6 +130,10 @@ class UnwrapConfig:
             raise ValueError("output dimensions are too small")
         if self.photo_crop_margin_px < 0:
             raise ValueError("photo_crop_margin_px must be >= 0")
+        if not 0 <= self.photo_crop_max_loss <= 1:
+            raise ValueError("photo_crop_max_loss must be between 0 and 1")
+        if not 0 <= self.photo_crop_max_width_loss <= 1:
+            raise ValueError("photo_crop_max_width_loss must be between 0 and 1")
         if not 0.2 <= self.central_band_ratio <= 1.0:
             raise ValueError("central_band_ratio must be between 0.2 and 1.0")
         if self.max_pose_residual_radians <= 0:
@@ -138,6 +148,10 @@ class UnwrapConfig:
             raise ValueError("mosaic_boundary_severe_error must be >= 0")
         if not 0 <= self.max_mosaic_boundary_severe_footprint <= 1:
             raise ValueError("max_mosaic_boundary_severe_footprint must be between 0 and 1")
+        if not 0 <= self.max_mosaic_anchor_conflict_footprint <= 1:
+            raise ValueError("max_mosaic_anchor_conflict_footprint must be between 0 and 1")
+        if not 0 <= self.max_mosaic_owner_instability <= 1:
+            raise ValueError("max_mosaic_owner_instability must be between 0 and 1")
         if not 0 <= self.temporal_decimation_max_mask_iou <= 1:
             raise ValueError("temporal_decimation_max_mask_iou must be between 0 and 1")
         if not 0 <= self.temporal_decimation_min_band_difference <= 1:

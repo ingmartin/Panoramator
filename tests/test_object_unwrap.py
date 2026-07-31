@@ -4,6 +4,7 @@ import json
 
 import cv2
 import numpy as np
+import pytest
 
 from panoramator.domain.models import Frame
 from panoramator.object_unwrap.analyzer import AnalyzedFrame
@@ -86,6 +87,39 @@ def test_monotonic_trajectory_rejects_reversed_outlier_without_reordering_frames
 def test_unwrap_config_limits_source_map_frame_ids() -> None:
     with np.testing.assert_raises_regex(ValueError, "65535"):
         UnwrapConfig(max_frames=65_536).validate()
+
+
+def test_unwrap_config_json_round_trip_normalizes_surface_kind(tmp_path) -> None:
+    config = UnwrapConfig(
+        surface_kind=SurfaceKind.CYLINDRICAL,
+        allow_partial=True,
+        photo_mode=True,
+        photo_crop_max_loss=0.25,
+        photo_crop_max_width_loss=0.2,
+    )
+    config_path = tmp_path / "unwrap.json"
+
+    config.save(config_path)
+    loaded = UnwrapConfig.from_json(config_path)
+
+    assert loaded == config
+    assert loaded.to_dict()["surface_kind"] == "cylindrical"
+
+
+@pytest.mark.parametrize(
+    ("settings", "message"),
+    [
+        ({"photo_crop_max_loss": -0.1}, "photo_crop_max_loss must be between 0 and 1"),
+        ({"photo_crop_max_loss": 1.1}, "photo_crop_max_loss must be between 0 and 1"),
+        ({"photo_crop_max_width_loss": -0.1}, "photo_crop_max_width_loss must be between 0 and 1"),
+        ({"photo_crop_max_width_loss": 1.1}, "photo_crop_max_width_loss must be between 0 and 1"),
+        ({"max_mosaic_anchor_conflict_footprint": -0.1}, "max_mosaic_anchor_conflict_footprint must be between 0 and 1"),
+        ({"max_mosaic_owner_instability": 1.1}, "max_mosaic_owner_instability must be between 0 and 1"),
+    ],
+)
+def test_unwrap_config_rejects_invalid_photo_mode_crop_thresholds(settings: dict[str, float], message: str) -> None:
+    with np.testing.assert_raises_regex(ValueError, message):
+        UnwrapConfig(**settings).validate()
 
 
 def test_image_pose_graph_marks_surface_supported_translation() -> None:

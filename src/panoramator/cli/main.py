@@ -181,6 +181,10 @@ def unwrap_command(args: argparse.Namespace) -> int:
         config.photo_mode = True
     if getattr(args, "photo_crop_margin_px", None) is not None:
         config.photo_crop_margin_px = args.photo_crop_margin_px
+    if getattr(args, "photo_crop_max_loss", None) is not None:
+        config.photo_crop_max_loss = args.photo_crop_max_loss
+    if getattr(args, "photo_crop_max_width_loss", None) is not None:
+        config.photo_crop_max_width_loss = args.photo_crop_max_width_loss
     if getattr(args, "save_debug_artifacts", False):
         config.save_debug_artifacts = True
     if getattr(args, "no_save_debug_artifacts", False):
@@ -313,6 +317,8 @@ def create_parser() -> argparse.ArgumentParser:
     unwrap.add_argument("--no-save-debug-artifacts", action="store_true")
     unwrap.add_argument("--photo-mode", action="store_true")
     unwrap.add_argument("--photo-crop-margin-px", type=int)
+    unwrap.add_argument("--photo-crop-max-loss", type=float)
+    unwrap.add_argument("--photo-crop-max-width-loss", type=float)
     unwrap.add_argument("--central-band-ratio", type=float)
     unwrap.add_argument("--max-pose-residual-radians", type=float)
     unwrap.add_argument("--min-accepted-pose-pair-fraction", type=float)

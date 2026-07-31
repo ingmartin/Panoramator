@@ -137,6 +137,8 @@ class CylinderUnwrapBuilder:
                 max_severe_boundary_fraction=config.max_mosaic_boundary_severe_fraction,
                 severe_error_threshold=config.mosaic_boundary_severe_error,
                 max_severe_boundary_footprint=config.max_mosaic_boundary_severe_footprint,
+                max_anchor_conflict_footprint=config.max_mosaic_anchor_conflict_footprint,
+                max_owner_instability=config.max_mosaic_owner_instability,
             )
             artifacts.update(
                 {
@@ -144,6 +146,10 @@ class CylinderUnwrapBuilder:
                     "mosaic_coverage": mosaic_coverage,
                     "mosaic_source": mosaic_source,
                     "mosaic_error": mosaic_error,
+                    "mosaic_boundary": gate.boundary_map,
+                    "mosaic_saliency": gate.saliency_map,
+                    "mosaic_overlap_conflict": gate.overlap_conflict_map,
+                    "mosaic_owner_instability": gate.owner_instability_map,
                     "mosaic_seam_risk": gate.seam_risk_map,
                 }
             )

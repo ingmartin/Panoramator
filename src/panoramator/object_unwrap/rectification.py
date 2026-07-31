@@ -15,7 +15,14 @@ class QualityGateResult:
     severe_boundary_footprint: float
     weighted_seam_risk: float
     weighted_seam_footprint: float
+    anchor_conflict_score: float
+    anchor_conflict_footprint: float
+    owner_instability_score: float
     seam_risk_map: np.ndarray
+    saliency_map: np.ndarray
+    overlap_conflict_map: np.ndarray
+    owner_instability_map: np.ndarray
+    boundary_map: np.ndarray
 
     @property
     def measurements(self) -> dict[str, float | int]:
@@ -27,6 +34,9 @@ class QualityGateResult:
             "quality_gate_severe_boundary_footprint": self.severe_boundary_footprint,
             "quality_gate_weighted_seam_risk": self.weighted_seam_risk,
             "quality_gate_weighted_seam_footprint": self.weighted_seam_footprint,
+            "quality_gate_anchor_conflict_score": self.anchor_conflict_score,
+            "quality_gate_anchor_conflict_footprint": self.anchor_conflict_footprint,
+            "quality_gate_owner_instability": self.owner_instability_score,
         }
 
 
@@ -38,6 +48,7 @@ class StripEstimate:
     valid_columns: np.ndarray
     column_fraction: float
     median_band_height: float
+    effective_band_width: float
     max_axis_step: float
     max_top_step: float
     max_bottom_step: float
@@ -47,6 +58,7 @@ class StripEstimate:
         return {
             "rectification_column_fraction": self.column_fraction,
             "rectification_median_band_height": self.median_band_height,
+            "rectification_effective_band_width": self.effective_band_width,
             "rectification_max_axis_step": self.max_axis_step,
             "rectification_max_top_step": self.max_top_step,
             "rectification_max_bottom_step": self.max_bottom_step,
@@ -62,37 +74,64 @@ def evaluate_mosaic_quality(
     max_severe_boundary_fraction: float,
     severe_error_threshold: float,
     max_severe_boundary_footprint: float,
+    max_anchor_conflict_footprint: float = 0.025,
+    max_owner_instability: float = 0.35,
 ) -> QualityGateResult:
-    occupied = coverage > 0
-    vertical_boundaries = occupied[:, 1:] & occupied[:, :-1] & (source_map[:, 1:] != source_map[:, :-1])
-    horizontal_boundaries = occupied[1:, :] & occupied[:-1, :] & (source_map[1:, :] != source_map[:-1, :])
-    boundary_mask = np.zeros_like(occupied, dtype=bool)
-    boundary_mask[:, 1:] |= vertical_boundaries
-    boundary_mask[:, :-1] |= vertical_boundaries
-    boundary_mask[1:, :] |= horizontal_boundaries
-    boundary_mask[:-1, :] |= horizontal_boundaries
+    occupied, boundary_mask = _boundary_mask(source_map, coverage)
     boundary_pixels = int(boundary_mask.sum())
     occupied_pixels = int(occupied.sum())
     if boundary_pixels == 0 or occupied_pixels == 0:
-        return QualityGateResult(True, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, np.zeros_like(coverage, dtype=np.uint8))
+        empty = np.zeros_like(coverage, dtype=np.uint8)
+        return QualityGateResult(
+            True,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+        )
     errors = error_map[boundary_mask].astype(np.float32)
     mean_boundary_error = float(np.mean(errors))
     severe_boundary_fraction = float(np.count_nonzero(errors >= severe_error_threshold) / max(boundary_pixels, 1))
     boundary_fraction = float(boundary_pixels / occupied_pixels)
     severe_boundary_footprint = boundary_fraction * severe_boundary_fraction
+    saliency_map = _saliency_map(image, occupied)
     seam_risk_map, weighted_seam_risk = _weighted_seam_risk_map(
-        image,
+        saliency_map,
         occupied,
         boundary_mask,
         error_map,
         severe_error_threshold,
     )
     weighted_seam_footprint = boundary_fraction * weighted_seam_risk
+    overlap_conflict_map, anchor_conflict_score = _overlap_conflict_map(
+        saliency_map,
+        boundary_mask,
+        error_map,
+        severe_error_threshold,
+    )
+    anchor_conflict_footprint = boundary_fraction * anchor_conflict_score
+    owner_instability_map, owner_instability_score = _owner_instability_map(
+        saliency_map,
+        occupied,
+        boundary_mask,
+    )
     return QualityGateResult(
         passed=(
             mean_boundary_error <= max_mean_boundary_error
             and severe_boundary_footprint <= max_severe_boundary_footprint
             and weighted_seam_footprint <= max_severe_boundary_footprint
+            and anchor_conflict_footprint <= max_anchor_conflict_footprint
+            and owner_instability_score <= max_owner_instability
             and (
                 severe_boundary_fraction <= max_severe_boundary_fraction
                 or weighted_seam_footprint <= max_severe_boundary_footprint * 0.75
@@ -104,7 +143,14 @@ def evaluate_mosaic_quality(
         severe_boundary_footprint=severe_boundary_footprint,
         weighted_seam_risk=weighted_seam_risk,
         weighted_seam_footprint=weighted_seam_footprint,
+        anchor_conflict_score=anchor_conflict_score,
+        anchor_conflict_footprint=anchor_conflict_footprint,
+        owner_instability_score=owner_instability_score,
         seam_risk_map=seam_risk_map,
+        saliency_map=saliency_map,
+        overlap_conflict_map=overlap_conflict_map,
+        owner_instability_map=owner_instability_map,
+        boundary_map=(boundary_mask.astype(np.uint8) * 255),
     )
 
 
@@ -145,6 +191,7 @@ def estimate_strip(
         return None
     top_step = float(np.max(np.abs(np.diff(top[valid_columns])))) if np.count_nonzero(valid_columns) > 1 else 0.0
     bottom_step = float(np.max(np.abs(np.diff(bottom[valid_columns])))) if np.count_nonzero(valid_columns) > 1 else 0.0
+    effective_band_width = _effective_band_width(band_height, valid_columns)
     return StripEstimate(
         top=top,
         axis=axis,
@@ -152,6 +199,7 @@ def estimate_strip(
         valid_columns=valid_columns,
         column_fraction=column_fraction,
         median_band_height=float(np.median(band_height[valid_columns])),
+        effective_band_width=effective_band_width,
         max_axis_step=smoothed_axis_step,
         max_top_step=top_step,
         max_bottom_step=bottom_step,
@@ -169,11 +217,11 @@ def rectify_mosaic(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     width = image.shape[1]
     scale = output_height / max(strip.median_band_height, 1.0)
-    target_width = max(1, round(width * scale))
+    target_width = max(1, round(strip.effective_band_width * scale))
     if output_width is not None:
         target_width = min(target_width, output_width)
     target_axis = (output_height - 1) * 0.5
-    columns = np.linspace(0, width - 1, target_width, dtype=np.float32)
+    columns = _normalized_columns(strip, target_width)
     map_x = np.repeat(columns[None, :], output_height, axis=0)
     map_y = np.empty((output_height, target_width), dtype=np.float32)
     upper = max(target_axis, 1.0)
@@ -267,22 +315,39 @@ def _regularize_strip_profiles(
     return regularized_top, regularized_axis, regularized_bottom
 
 
+def _boundary_mask(source_map: np.ndarray, coverage: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    occupied = coverage > 0
+    vertical_boundaries = occupied[:, 1:] & occupied[:, :-1] & (source_map[:, 1:] != source_map[:, :-1])
+    horizontal_boundaries = occupied[1:, :] & occupied[:-1, :] & (source_map[1:, :] != source_map[:-1, :])
+    boundary_mask = np.zeros_like(occupied, dtype=bool)
+    boundary_mask[:, 1:] |= vertical_boundaries
+    boundary_mask[:, :-1] |= vertical_boundaries
+    boundary_mask[1:, :] |= horizontal_boundaries
+    boundary_mask[:-1, :] |= horizontal_boundaries
+    return occupied, boundary_mask
+
+
+def _saliency_map(image: np.ndarray, occupied: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    gradient_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gradient_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    gradient = cv2.magnitude(gradient_x, gradient_y)
+    saliency = np.zeros_like(gradient, dtype=np.float32)
+    occupied_gradient = gradient[occupied]
+    if occupied_gradient.size:
+        scale = max(float(np.percentile(occupied_gradient, 95)), 1.0)
+        saliency[occupied] = np.clip(occupied_gradient / scale, 0.0, 1.0)
+    return np.clip(saliency * 255.0, 0, 255).astype(np.uint8)
+
+
 def _weighted_seam_risk_map(
-    image: np.ndarray,
+    saliency_map: np.ndarray,
     occupied: np.ndarray,
     boundary_mask: np.ndarray,
     error_map: np.ndarray,
     severe_error_threshold: float,
 ) -> tuple[np.ndarray, float]:
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    gradient_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-    gradient_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-    gradient = cv2.magnitude(gradient_x, gradient_y)
-    detail = np.zeros_like(gradient, dtype=np.float32)
-    occupied_gradient = gradient[occupied]
-    if occupied_gradient.size:
-        scale = max(float(np.percentile(occupied_gradient, 95)), 1.0)
-        detail[occupied] = np.clip(occupied_gradient / scale, 0.0, 1.0)
+    detail = saliency_map.astype(np.float32) / 255.0
     boundary_float = boundary_mask.astype(np.float32)
     severe_map = ((error_map.astype(np.float32) >= severe_error_threshold) & boundary_mask).astype(np.float32)
     local_boundary_density = cv2.GaussianBlur(boundary_float, (0, 0), sigmaX=6.0, sigmaY=6.0)
@@ -296,3 +361,69 @@ def _weighted_seam_risk_map(
     scale = max(float(np.max(boundary_values)) if boundary_values.size else 0.0, 1e-6)
     risk_map = np.clip(risk / scale * 255.0, 0, 255).astype(np.uint8)
     return risk_map, weighted_seam_risk
+
+
+def _overlap_conflict_map(
+    saliency_map: np.ndarray,
+    boundary_mask: np.ndarray,
+    error_map: np.ndarray,
+    severe_error_threshold: float,
+) -> tuple[np.ndarray, float]:
+    detail = saliency_map.astype(np.float32) / 255.0
+    boundary_float = boundary_mask.astype(np.float32)
+    error_weight = np.clip(error_map.astype(np.float32) / max(float(severe_error_threshold), 1.0), 0.0, 2.0)
+    risk = boundary_float * error_weight * (0.15 + 0.85 * detail)
+    risk = cv2.GaussianBlur(risk, (0, 0), sigmaX=2.0, sigmaY=2.0) * boundary_float
+    values = risk[boundary_mask]
+    score = float(np.mean(values)) if values.size else 0.0
+    scale = max(float(np.max(values)) if values.size else 0.0, 1e-6)
+    return np.clip(risk / scale * 255.0, 0, 255).astype(np.uint8), score
+
+
+def _owner_instability_map(
+    saliency_map: np.ndarray,
+    occupied: np.ndarray,
+    boundary_mask: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    detail = saliency_map.astype(np.float32) / 255.0
+    boundary_float = boundary_mask.astype(np.float32)
+    local_boundary_density = cv2.GaussianBlur(boundary_float, (0, 0), sigmaX=5.0, sigmaY=5.0)
+    local_detail = cv2.GaussianBlur(detail, (0, 0), sigmaX=3.0, sigmaY=3.0)
+    instability = np.clip(local_boundary_density, 0.0, 1.0) * (0.2 + 0.8 * local_detail)
+    instability *= occupied.astype(np.float32)
+    occupied_values = instability[occupied]
+    score = float(np.mean(occupied_values)) if occupied_values.size else 0.0
+    scale = max(float(np.max(occupied_values)) if occupied_values.size else 0.0, 1e-6)
+    return np.clip(instability / scale * 255.0, 0, 255).astype(np.uint8), score
+
+
+def _effective_band_width(band_height: np.ndarray, valid: np.ndarray) -> float:
+    if not np.any(valid):
+        return float(len(band_height))
+    median_height = max(float(np.median(band_height[valid])), 1.0)
+    local_scale = np.clip(band_height / median_height, 0.85, 1.15)
+    local_scale = np.where(valid, local_scale, 0.0)
+    return float(max(np.sum(local_scale), np.count_nonzero(valid), 1.0))
+
+
+def _normalized_columns(strip: StripEstimate, target_width: int) -> np.ndarray:
+    width = len(strip.top)
+    if target_width <= 1 or width <= 1:
+        return np.zeros((target_width,), dtype=np.float32)
+    band_height = np.maximum(strip.bottom - strip.top, 1.0)
+    median_height = max(strip.median_band_height, 1.0)
+    local_scale = np.clip(band_height / median_height, 0.85, 1.15).astype(np.float32)
+    local_scale = np.where(strip.valid_columns, local_scale, 0.0)
+    valid_indices = np.flatnonzero(strip.valid_columns)
+    if valid_indices.size:
+        indices = np.arange(width, dtype=np.float32)
+        local_scale[~strip.valid_columns] = np.interp(indices[~strip.valid_columns], indices[strip.valid_columns], local_scale[strip.valid_columns])
+    local_scale = np.clip(local_scale, 0.85, 1.15)
+    positions = np.zeros(width, dtype=np.float32)
+    if width > 1:
+        steps = (local_scale[:-1] + local_scale[1:]) * 0.5
+        positions[1:] = np.cumsum(steps)
+    if positions[-1] <= 0:
+        return np.linspace(0, width - 1, target_width, dtype=np.float32)
+    targets = np.linspace(0.0, positions[-1], target_width, dtype=np.float32)
+    return np.interp(targets, positions, np.arange(width, dtype=np.float32)).astype(np.float32)

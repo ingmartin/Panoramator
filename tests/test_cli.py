@@ -76,6 +76,8 @@ def _unwrap_args(**overrides) -> argparse.Namespace:
         "output_height": None,
         "photo_mode": False,
         "photo_crop_margin_px": None,
+        "photo_crop_max_loss": None,
+        "photo_crop_max_width_loss": None,
         "save_debug_artifacts": False,
         "no_save_debug_artifacts": False,
         "central_band_ratio": None,
@@ -258,6 +260,8 @@ def test_unwrap_command_applies_overrides_and_prints_summary(monkeypatch, capsys
         output_height=400,
         photo_mode=True,
         photo_crop_margin_px=5,
+        photo_crop_max_loss=0.2,
+        photo_crop_max_width_loss=0.15,
         save_debug_artifacts=True,
         no_save_debug_artifacts=True,
         central_band_ratio=0.6,
@@ -292,6 +296,8 @@ def test_unwrap_command_applies_overrides_and_prints_summary(monkeypatch, capsys
     assert config.output_height == 400
     assert config.photo_mode is True
     assert config.photo_crop_margin_px == 5
+    assert config.photo_crop_max_loss == 0.2
+    assert config.photo_crop_max_width_loss == 0.15
     assert config.save_debug_artifacts is False
     assert config.central_band_ratio == 0.6
     assert config.max_pose_residual_radians == 0.1

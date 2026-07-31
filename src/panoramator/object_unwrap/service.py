@@ -140,16 +140,35 @@ class ObjectUnwrapper:
         bgra = cv2.cvtColor(image, cv2.COLOR_BGR2BGRA)
         bgra[:, :, 3] = coverage
         if self.config.photo_mode:
-            bgra, _crop_policy, _crop_loss = crop_with_policy(
-                bgra,
-                coverage,
-                "inscribed_rectangle",
-                max_inscribed_loss=1.0,
-                max_inscribed_width_loss=1.0,
-                force_inscribed=True,
-                inscribed_margin=self.config.photo_crop_margin_px,
-            )
-            coverage = bgra[:, :, 3].copy()
+            # Presentation cleanup is allowed for any published partial result.
+            # The safety boundary is the crop-loss policy, not the upstream
+            # geometry status: users may still want a cleaner alpha on a
+            # baseline mosaic or a planar fallback without pretending the
+            # geometry became better than it is.
+            photo_mode_eligible = status in {UnwrapStatus.OK, UnwrapStatus.PARTIAL_SURFACE}
+            measurements["photo_mode_eligible"] = int(photo_mode_eligible)
+            if photo_mode_eligible:
+                cropped, crop_policy, crop_loss = crop_with_policy(
+                    bgra,
+                    coverage,
+                    "inscribed_rectangle",
+                    max_inscribed_loss=self.config.photo_crop_max_loss,
+                    max_inscribed_width_loss=self.config.photo_crop_max_width_loss,
+                    force_inscribed=False,
+                    inscribed_margin=self.config.photo_crop_margin_px,
+                )
+                if crop_policy == "inscribed_rectangle":
+                    bgra = cropped
+                    coverage = bgra[:, :, 3].copy()
+                    measurements["photo_mode_applied"] = 1
+                else:
+                    measurements["photo_mode_applied"] = 0
+                measurements["photo_mode_crop_policy"] = crop_policy
+                measurements["photo_mode_crop_loss"] = float(crop_loss)
+            else:
+                measurements["photo_mode_applied"] = 0
+                measurements["photo_mode_crop_policy"] = "skipped_ineligible"
+                measurements["photo_mode_crop_loss"] = 0.0
         output.parent.mkdir(parents=True, exist_ok=True)
         if output.suffix.lower() not in {".png", ".webp", ".tiff"}:
             raise ValueError("object unwrap output must support alpha: PNG, WebP, or TIFF")
