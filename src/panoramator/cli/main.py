@@ -5,7 +5,12 @@ from pathlib import Path
 
 from panoramator.application.use_cases import PanoramaBuilder
 from panoramator.config.models import PanoramaConfig
-from panoramator.object_unwrap import SurfaceKind, ObjectUnwrapper, UnwrapConfig, UnwrapStatus
+from panoramator.object_unwrap import (
+    ObjectUnwrapper,
+    SurfaceKind,
+    UnwrapConfig,
+    UnwrapStatus,
+)
 
 
 def build_command(args: argparse.Namespace) -> int:
@@ -164,7 +169,7 @@ def unwrap_command(args: argparse.Namespace) -> int:
         print(f"Unwrap saved to: {result.output_path}")
     if result.diagnostics.recommendation:
         print(f"Recommendation: {result.diagnostics.recommendation}")
-    return 0 if result.diagnostics.status in {UnwrapStatus.OK, UnwrapStatus.PARTIAL_SURFACE} else 2
+    return 0 if result.output_path is not None and result.diagnostics.status in {UnwrapStatus.OK, UnwrapStatus.PARTIAL_SURFACE} else 2
 
 
 def export_config_command(args: argparse.Namespace) -> int:

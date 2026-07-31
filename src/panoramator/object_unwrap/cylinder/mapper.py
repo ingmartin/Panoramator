@@ -10,7 +10,7 @@ def normalized_wall(image: np.ndarray, mask: np.ndarray, bbox: tuple[int, int, i
     wall_mask = mask[y : y + source_height, x : x + width]
     # Exclude a thin silhouette boundary, where the background can leak in.
     wall_mask = cv2.erode(wall_mask, np.ones((3, 3), np.uint8))
-    target_width = max(16, int(round(width * height / max(source_height, 1))))
+    target_width = max(16, round(width * height / max(source_height, 1)))
     return (
         cv2.resize(wall, (target_width, height), interpolation=cv2.INTER_AREA),
         cv2.resize(wall_mask, (target_width, height), interpolation=cv2.INTER_NEAREST),
@@ -20,7 +20,7 @@ def normalized_wall(image: np.ndarray, mask: np.ndarray, bbox: tuple[int, int, i
 def central_band(image: np.ndarray, mask: np.ndarray, ratio: float) -> tuple[np.ndarray, np.ndarray]:
     """Keep the low-perspective central part of an observed surface patch."""
     width = image.shape[1]
-    band_width = max(8, int(round(width * ratio)))
+    band_width = max(8, round(width * ratio))
     start = max(0, (width - band_width) // 2)
     end = min(width, start + band_width)
     return image[:, start:end], mask[:, start:end]

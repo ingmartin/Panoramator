@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+import itertools
+
 import cv2
 import numpy as np
 
 from ..analyzer import AnalyzedFrame
 from ..coverage import coverage_fraction, least_covered_seam
 from ..image_pose_graph import build_image_pose_graph
-from ..planar_mosaic import build_planar_mosaic
 from ..models import SurfaceModel, UnwrapConfig
+from ..planar_mosaic import build_planar_mosaic
 from .fitting import fit_cylinder
-from .mapper import angular_increment, central_band, feature_shift, flow_angular_increment, horizontal_shift, normalized_wall
+from .mapper import (
+    angular_increment,
+    central_band,
+    feature_shift,
+    flow_angular_increment,
+    horizontal_shift,
+    normalized_wall,
+)
 from .pose import solve_monotonic_trajectory
 
 
@@ -28,7 +37,7 @@ class CylinderUnwrapBuilder:
         ]
         half_view_angle = float(np.arcsin(config.central_band_ratio))
         observations: list[tuple[float, float]] = []
-        for (previous, previous_mask), (current, current_mask) in zip(fragments, fragments[1:], strict=False):
+        for (previous, previous_mask), (current, current_mask) in itertools.pairwise(fragments):
             if config.enable_global_pose_optimization:
                 step, response = flow_angular_increment(previous, previous_mask, current, config.central_band_ratio)
                 if response < 0.35:
@@ -190,7 +199,7 @@ class CylinderUnwrapBuilder:
         error = np.zeros((height, atlas_width), np.float32)
         for index, ((image, mask), angle) in enumerate(zip(fragments, angles, strict=True), start=1):
             width = image.shape[1]
-            centre = int(round((angle - min_angle) / max(angle_span, 1e-9) * (atlas_width - 1)))
+            centre = round((angle - min_angle) / max(angle_span, 1e-9) * (atlas_width - 1))
             left, right = max(0, centre - width // 2), min(atlas_width, centre - width // 2 + width)
             source_left, source_right = left - (centre - width // 2), right - (centre - width // 2)
             patch = image[:, source_left:source_right]
@@ -229,7 +238,7 @@ class CylinderUnwrapBuilder:
         source_height = float(np.median([box[3] for box in boxes]))
         radius = float(np.median([box[2] for box in boxes])) * 0.5
         pixels_per_radian = config.output_height / max(source_height, 1.0) * max(radius, 1.0)
-        width = int(round(angle_span * pixels_per_radian))
+        width = round(angle_span * pixels_per_radian)
         return int(np.clip(width, 64, config.output_width)), pixels_per_radian
 
     def _global_angles(

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import itertools
+
 import cv2
 import numpy as np
 
@@ -12,7 +14,7 @@ def build_planar_mosaic(
     """Warp observed masks with graph transforms into one image-space mosaic."""
     by_pair = {(int(edge["left_frame"]), int(edge["right_frame"])): edge for edge in edges if edge["reason"] == "ok"}
     transforms = [np.eye(3, dtype=np.float64)]
-    for left, right in zip(frames, frames[1:], strict=False):
+    for left, right in itertools.pairwise(frames):
         edge = by_pair.get((left.frame.index, right.frame.index))
         if edge is None:
             return None
@@ -53,7 +55,7 @@ def build_planar_mosaic(
     coverage: np.ndarray = np.where(strength > 0, 255, 0).astype(np.uint8)
     if output_height != height:
         scale = output_height / height
-        target_width = max(1, int(round(width * scale)))
+        target_width = max(1, round(width * scale))
         canvas = cv2.resize(canvas, (target_width, output_height), interpolation=cv2.INTER_AREA)
         coverage = cv2.resize(coverage, (target_width, output_height), interpolation=cv2.INTER_NEAREST)
         owner = cv2.resize(owner, (target_width, output_height), interpolation=cv2.INTER_NEAREST)

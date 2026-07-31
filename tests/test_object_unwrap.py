@@ -12,7 +12,12 @@ from panoramator.object_unwrap.cylinder.builder import CylinderUnwrapBuilder
 from panoramator.object_unwrap.cylinder.pose import solve_monotonic_trajectory
 from panoramator.object_unwrap.diagnostics import write_artifacts
 from panoramator.object_unwrap.image_pose_graph import build_image_pose_graph
-from panoramator.object_unwrap.models import SurfaceKind, UnwrapConfig, UnwrapDiagnostics, UnwrapStatus
+from panoramator.object_unwrap.models import (
+    SurfaceKind,
+    UnwrapConfig,
+    UnwrapDiagnostics,
+    UnwrapStatus,
+)
 
 
 def _frame(index: int, shift: int) -> AnalyzedFrame:

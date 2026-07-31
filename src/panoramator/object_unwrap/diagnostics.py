@@ -22,7 +22,8 @@ def write_artifacts(
     files = list(diagnostics.output_files)
     files.append(str(diagnostics_path))
     if coverage is not None:
-        cv2.imwrite(str(coverage_path), coverage)
+        if not cv2.imwrite(str(coverage_path), coverage):
+            raise RuntimeError(f"Failed to write unwrap coverage: {coverage_path}")
         files.append(str(coverage_path))
     for name, artifact in (artifacts or {}).items():
         if isinstance(artifact, np.ndarray):

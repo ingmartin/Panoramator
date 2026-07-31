@@ -12,10 +12,16 @@ from panoramator.io.video import OpenCVVideoSource
 
 from .analyzer import VideoAnalyzer
 from .coverage import coverage_fraction
-from .diagnostics import write_artifacts
 from .curved.builder import CurvedSurfaceFallbackBuilder
 from .cylinder.builder import CylinderUnwrapBuilder
-from .models import SurfaceKind, UnwrapConfig, UnwrapDiagnostics, UnwrapResult, UnwrapStatus
+from .diagnostics import write_artifacts
+from .models import (
+    SurfaceKind,
+    UnwrapConfig,
+    UnwrapDiagnostics,
+    UnwrapResult,
+    UnwrapStatus,
+)
 
 
 class ObjectUnwrapper:
