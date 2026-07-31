@@ -34,6 +34,8 @@ class StripEstimate:
     column_fraction: float
     median_band_height: float
     max_axis_step: float
+    max_top_step: float
+    max_bottom_step: float
 
     @property
     def measurements(self) -> dict[str, float | int]:
@@ -41,6 +43,8 @@ class StripEstimate:
             "rectification_column_fraction": self.column_fraction,
             "rectification_median_band_height": self.median_band_height,
             "rectification_max_axis_step": self.max_axis_step,
+            "rectification_max_top_step": self.max_top_step,
+            "rectification_max_bottom_step": self.max_bottom_step,
         }
 
 
@@ -103,6 +107,7 @@ def estimate_strip(
         bottom[column] = float(ys[-1])
         axis[column] = float(np.mean(ys))
         valid_columns[column] = True
+    valid_columns = _filter_support_columns(top, bottom, valid_columns, rows)
     column_fraction = float(np.count_nonzero(valid_columns) / max(columns, 1))
     if column_fraction < min_column_fraction:
         return None
@@ -116,6 +121,8 @@ def estimate_strip(
     smoothed_axis_step = float(np.max(np.abs(np.diff(axis[valid_columns])))) if np.count_nonzero(valid_columns) > 1 else 0.0
     if smoothed_axis_step > max_axis_step:
         return None
+    top_step = float(np.max(np.abs(np.diff(top[valid_columns])))) if np.count_nonzero(valid_columns) > 1 else 0.0
+    bottom_step = float(np.max(np.abs(np.diff(bottom[valid_columns])))) if np.count_nonzero(valid_columns) > 1 else 0.0
     return StripEstimate(
         top=top,
         axis=axis,
@@ -124,6 +131,8 @@ def estimate_strip(
         column_fraction=column_fraction,
         median_band_height=float(np.median(band_height[valid_columns])),
         max_axis_step=smoothed_axis_step,
+        max_top_step=top_step,
+        max_bottom_step=bottom_step,
     )
 
 
@@ -179,3 +188,34 @@ def _smooth_profile(values: np.ndarray, valid: np.ndarray, window: int) -> np.nd
     kernel = max(3, window | 1)
     result = cv2.GaussianBlur(result[None, :], (kernel, 1), 0).reshape(-1)
     return result.astype(np.float32, copy=False)
+
+
+def _filter_support_columns(top: np.ndarray, bottom: np.ndarray, valid: np.ndarray, rows: int) -> np.ndarray:
+    filtered = valid.copy()
+    if np.count_nonzero(filtered) < 3:
+        return filtered
+    heights = bottom - top + 1.0
+    median_height = float(np.median(heights[filtered]))
+    if median_height <= 0:
+        return np.zeros_like(filtered)
+    smooth_top = _smooth_profile(top, filtered, 9)
+    smooth_bottom = _smooth_profile(bottom, filtered, 9)
+    top_residual = np.abs(top - smooth_top)
+    bottom_residual = np.abs(bottom - smooth_bottom)
+    top_step = np.zeros_like(top, dtype=np.float32)
+    bottom_step = np.zeros_like(bottom, dtype=np.float32)
+    top_delta = np.abs(np.diff(smooth_top))
+    bottom_delta = np.abs(np.diff(smooth_bottom))
+    top_step[1:] = np.maximum(top_step[1:], top_delta)
+    top_step[:-1] = np.maximum(top_step[:-1], top_delta)
+    bottom_step[1:] = np.maximum(bottom_step[1:], bottom_delta)
+    bottom_step[:-1] = np.maximum(bottom_step[:-1], bottom_delta)
+    min_height = max(8.0, median_height * 0.4)
+    residual_tolerance = max(3.0, rows * 0.06, median_height * 0.18)
+    step_tolerance = max(3.0, median_height * 0.16)
+    filtered &= heights >= min_height
+    filtered &= top_residual <= residual_tolerance
+    filtered &= bottom_residual <= residual_tolerance
+    filtered &= top_step <= step_tolerance
+    filtered &= bottom_step <= step_tolerance
+    return filtered

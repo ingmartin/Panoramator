@@ -109,17 +109,25 @@ def publish_surface_mask(mask: np.ndarray, bbox: tuple[int, int, int, int]) -> n
     indices = np.arange(width, dtype=np.float32)
     tops[~valid] = np.interp(indices[~valid], indices[valid], tops[valid])
     bottoms[~valid] = np.interp(indices[~valid], indices[valid], bottoms[valid])
+    band_heights = bottoms - tops + 1.0
+    median_height = float(np.median(band_heights[valid]))
     kernel = max(9, (width // 12) | 1)
     smooth_top = cv2.GaussianBlur(tops[None, :], (kernel, 1), 0).reshape(-1)
     smooth_bottom = cv2.GaussianBlur(bottoms[None, :], (kernel, 1), 0).reshape(-1)
     margin = max(2, height // 30)
+    spike_tolerance = max(2.0, median_height * 0.12)
+    min_support_height = max(6.0, median_height * 0.35)
     for column in range(x, x + width):
         local = column - x
-        top = int(round(max(y, smooth_top[local] - margin)))
-        bottom = int(round(min(y + height - 1, smooth_bottom[local] + margin)))
+        trimmed_top = max(tops[local], smooth_top[local] - spike_tolerance)
+        trimmed_bottom = min(bottoms[local], smooth_bottom[local] + spike_tolerance)
+        top = int(round(max(y, trimmed_top - margin)))
+        bottom = int(round(min(y + height - 1, trimmed_bottom + margin)))
         if bottom < top:
             continue
         present = mask[top : bottom + 1, column] > 0
+        if int(np.count_nonzero(present)) < min_support_height:
+            continue
         result[top : bottom + 1, column][present] = 255
     result = cv2.morphologyEx(result, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
     return result

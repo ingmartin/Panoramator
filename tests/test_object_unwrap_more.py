@@ -28,11 +28,13 @@ from panoramator.object_unwrap.models import (
     UnwrapResult,
     UnwrapStatus,
 )
+from panoramator.object_unwrap.planar_mosaic import build_planar_mosaic
 from panoramator.object_unwrap.pose import optimize_rotation_angles
 from panoramator.object_unwrap.rectification import estimate_strip, evaluate_mosaic_quality, rectify_mosaic
 from panoramator.object_unwrap.segmentation import (
     masked_sharpness,
     object_mask,
+    publish_surface_mask,
     stable_surface_bbox,
 )
 from panoramator.object_unwrap.service import ObjectUnwrapper
@@ -57,6 +59,17 @@ def test_segmentation_helpers_return_foreground_geometry(monkeypatch: pytest.Mon
     assert stable_surface_bbox(mask) == (12, 8, 27, 26)
     assert masked_sharpness(image, mask) == 0.0
     assert object_mask(np.zeros((7, 7, 3), np.uint8)) is None
+
+
+def test_publish_surface_mask_trims_upper_spikes_from_observed_band() -> None:
+    mask = np.zeros((48, 32), np.uint8)
+    mask[12:40, 6:26] = 255
+    mask[3:12, 14:16] = 255
+
+    publish = publish_surface_mask(mask, (6, 12, 20, 28))
+
+    assert np.count_nonzero(publish[3:11, 14:16]) == 0
+    assert np.all(publish[16:36, 8:24] == 255)
 
 
 def test_analyzer_reports_blur_and_auto_selects_cylindrical(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -211,6 +224,58 @@ def test_unwrapper_photo_mode_crops_to_visible_area(monkeypatch: pytest.MonkeyPa
     assert saved.shape[:2] == (4, 6)
 
 
+def test_unwrapper_uses_planar_fallback_when_geometry_is_not_confirmed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from panoramator.object_unwrap import service
+
+    class FakeSource:
+        def __init__(self, *args) -> None:
+            pass
+
+        def open(self) -> None:
+            return None
+
+        def iter_frames(self):
+            return [Frame(0, 0.0, np.zeros((8, 8, 3), np.uint8)), Frame(1, 1.0, np.zeros((8, 8, 3), np.uint8))]
+
+        def close(self) -> None:
+            return None
+
+    analyzed = [_analyzed_frame(0), _analyzed_frame(1), _analyzed_frame(2)]
+    planar = np.full((5, 7, 3), 90, np.uint8)
+    planar_coverage = np.full((5, 7), 255, np.uint8)
+    monkeypatch.setattr(service, "OpenCVVideoSource", FakeSource)
+    monkeypatch.setattr(service.VideoAnalyzer, "analyze", lambda self, frames, config: Analysis(analyzed, SurfaceKind.CYLINDRICAL))
+    monkeypatch.setattr(
+        service.CylinderUnwrapBuilder,
+        "build",
+        lambda self, frames, config: (
+            np.full((6, 8, 3), 140, np.uint8),
+            np.full((6, 8), 255, np.uint8),
+            SurfaceModel(SurfaceKind.CYLINDRICAL),
+            {
+                "surface_coverage_fraction": 1.0,
+                "pose_residual_radians": 0.5,
+                "accepted_pose_pairs": 0,
+                "quality_gate_passed": 1,
+                "rectification_applied": 0,
+            },
+            {"mosaic": planar.copy(), "mosaic_coverage": planar_coverage.copy()},
+        ),
+    )
+
+    output = tmp_path / "surface.png"
+    result = ObjectUnwrapper(UnwrapConfig(allow_partial=True)).unwrap_video("input.mp4", output)
+
+    saved = cv2.imread(str(output), cv2.IMREAD_UNCHANGED)
+    assert result.diagnostics.status is UnwrapStatus.PARTIAL_SURFACE
+    assert result.diagnostics.message.startswith("A connected image-space mosaic is available")
+    assert saved.shape[:2] == planar_coverage.shape
+    assert np.all(saved[:, :, :3] == 90)
+    assert np.array_equal(saved[:, :, 3], planar_coverage)
+
+
 def test_unwrapper_returns_failure_diagnostics_without_writing_an_image(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     from panoramator.object_unwrap import service
 
@@ -226,6 +291,81 @@ def test_unwrapper_returns_failure_diagnostics_without_writing_an_image(monkeypa
     assert result.diagnostics.status is UnwrapStatus.OBJECT_NOT_DETECTED
     assert not output.exists()
     assert (tmp_path / "surface_debug" / "run.json").exists()
+
+
+def test_unwrapper_rejects_output_formats_without_alpha(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from panoramator.object_unwrap import service
+
+    class FakeSource:
+        def __init__(self, *args) -> None:
+            pass
+
+        def open(self) -> None:
+            return None
+
+        def iter_frames(self):
+            return [Frame(0, 0.0, np.zeros((8, 8, 3), np.uint8)), Frame(1, 1.0, np.zeros((8, 8, 3), np.uint8))]
+
+        def close(self) -> None:
+            return None
+
+    analyzed = [_analyzed_frame(0), _analyzed_frame(1)]
+    monkeypatch.setattr(service, "OpenCVVideoSource", FakeSource)
+    monkeypatch.setattr(service.VideoAnalyzer, "analyze", lambda self, frames, config: Analysis(analyzed, SurfaceKind.CYLINDRICAL))
+    monkeypatch.setattr(
+        service.CylinderUnwrapBuilder,
+        "build",
+        lambda self, frames, config: (
+            np.full((6, 7, 3), 120, np.uint8),
+            np.full((6, 7), 255, np.uint8),
+            SurfaceModel(SurfaceKind.CYLINDRICAL),
+            {"surface_coverage_fraction": 1.0, "pose_residual_radians": 0.01, "accepted_pose_pairs": 2, "quality_gate_passed": 1, "rectification_applied": 1},
+            {},
+        ),
+    )
+
+    with pytest.raises(ValueError, match="support alpha"):
+        ObjectUnwrapper(UnwrapConfig(min_accepted_pose_pair_fraction=1.0, allow_partial=True)).unwrap_video(
+            "input.mp4", tmp_path / "surface.jpg"
+        )
+
+
+def test_unwrapper_raises_when_image_cannot_be_written(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from panoramator.object_unwrap import service
+
+    class FakeSource:
+        def __init__(self, *args) -> None:
+            pass
+
+        def open(self) -> None:
+            return None
+
+        def iter_frames(self):
+            return [Frame(0, 0.0, np.zeros((8, 8, 3), np.uint8)), Frame(1, 1.0, np.zeros((8, 8, 3), np.uint8))]
+
+        def close(self) -> None:
+            return None
+
+    analyzed = [_analyzed_frame(0), _analyzed_frame(1)]
+    monkeypatch.setattr(service, "OpenCVVideoSource", FakeSource)
+    monkeypatch.setattr(service.VideoAnalyzer, "analyze", lambda self, frames, config: Analysis(analyzed, SurfaceKind.CYLINDRICAL))
+    monkeypatch.setattr(
+        service.CylinderUnwrapBuilder,
+        "build",
+        lambda self, frames, config: (
+            np.full((6, 7, 3), 120, np.uint8),
+            np.full((6, 7), 255, np.uint8),
+            SurfaceModel(SurfaceKind.CYLINDRICAL),
+            {"surface_coverage_fraction": 1.0, "pose_residual_radians": 0.01, "accepted_pose_pairs": 2, "quality_gate_passed": 1, "rectification_applied": 1},
+            {},
+        ),
+    )
+    monkeypatch.setattr(cv2, "imwrite", lambda path, image: False)
+
+    with pytest.raises(RuntimeError, match="Failed to write unwrap image"):
+        ObjectUnwrapper(UnwrapConfig(min_accepted_pose_pair_fraction=1.0, allow_partial=True)).unwrap_video(
+            "input.mp4", tmp_path / "surface.png"
+        )
 
 
 def test_unwrapper_can_disable_debug_artifacts(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -317,6 +457,65 @@ def test_strip_estimate_and_rectification_straighten_observed_band() -> None:
     assert rectified.shape[1] > width
     assert rectified_source.shape == rectified.shape[:2]
     assert rectified_error.shape == rectified.shape[:2]
+
+
+def test_planar_mosaic_prefers_stronger_overlap_and_records_conflict_error() -> None:
+    left = np.full((12, 12, 3), 20, np.uint8)
+    right = np.full((12, 12, 3), 180, np.uint8)
+    mask = np.full((12, 12), 255, np.uint8)
+    frames = [
+        AnalyzedFrame(Frame(0, 0.0, left), mask, mask.copy(), 1.0, (0, 0, 12, 12)),
+        AnalyzedFrame(Frame(1, 1.0, right), mask, mask.copy(), 2.0, (0, 0, 12, 12)),
+    ]
+    edges = [
+        {
+            "left_frame": 0,
+            "right_frame": 1,
+            "reason": "ok",
+            "a00": 1.0,
+            "a01": 0.0,
+            "a02": 0.0,
+            "a10": 0.0,
+            "a11": 1.0,
+            "a12": 0.0,
+        }
+    ]
+
+    mosaic = build_planar_mosaic(frames, edges, output_height=12)
+
+    assert mosaic is not None
+    image, coverage, owner, error = mosaic
+    assert np.all(coverage == 255)
+    assert np.all(owner == 2)
+    assert np.all(image == 180)
+    assert int(error.max()) > 0
+
+
+def test_planar_mosaic_requires_a_connected_edge_chain() -> None:
+    image = np.full((12, 12, 3), 20, np.uint8)
+    mask = np.full((12, 12), 255, np.uint8)
+    frames = [
+        AnalyzedFrame(Frame(0, 0.0, image), mask, mask.copy(), 1.0, (0, 0, 12, 12)),
+        AnalyzedFrame(Frame(1, 1.0, image), mask, mask.copy(), 1.0, (0, 0, 12, 12)),
+    ]
+
+    assert build_planar_mosaic(frames, [], output_height=12) is None
+
+
+def test_strip_estimate_rejects_columns_with_spikes_and_weak_support() -> None:
+    coverage = np.zeros((60, 36), np.uint8)
+    for x in range(36):
+        coverage[12:44, x] = 255
+    coverage[4:12, 10] = 255
+    coverage[:, 24] = 0
+    coverage[20:28, 24] = 255
+
+    strip = estimate_strip(coverage, min_column_fraction=0.8, smoothing_window=7, max_axis_step=4.0)
+
+    assert strip is not None
+    assert strip.valid_columns[10] == 0
+    assert strip.valid_columns[24] == 0
+    assert strip.measurements["rectification_column_fraction"] < 1.0
 
 
 def test_cylinder_builder_prefers_baseline_planar_mosaic_over_angular_mosaic(
