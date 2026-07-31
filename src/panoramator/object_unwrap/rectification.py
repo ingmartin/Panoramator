@@ -135,6 +135,7 @@ def estimate_strip(
     top = _smooth_profile(top, valid_columns, smoothing_window)
     bottom = _smooth_profile(bottom, valid_columns, smoothing_window)
     axis = _smooth_profile(axis, valid_columns, smoothing_window)
+    top, axis, bottom = _regularize_strip_profiles(top, axis, bottom, valid_columns, smoothing_window)
     axis = np.clip(axis, top + 1.0, bottom - 1.0)
     band_height = bottom - top
     if not np.all(np.isfinite(band_height[valid_columns])) or float(np.median(band_height[valid_columns])) < max(12.0, rows * 0.1):
@@ -240,6 +241,30 @@ def _filter_support_columns(top: np.ndarray, bottom: np.ndarray, valid: np.ndarr
     filtered &= top_step <= step_tolerance
     filtered &= bottom_step <= step_tolerance
     return filtered
+
+
+def _regularize_strip_profiles(
+    top: np.ndarray,
+    axis: np.ndarray,
+    bottom: np.ndarray,
+    valid: np.ndarray,
+    smoothing_window: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    band_height = np.maximum(bottom - top, 2.0)
+    median_height = float(np.median(band_height[valid])) if np.any(valid) else 2.0
+    height_window = max(9, ((smoothing_window * 2) + 1) | 1)
+    axis_window = max(9, ((smoothing_window * 3) // 2) | 1)
+    smoothed_axis = _smooth_profile((top + bottom) * 0.5, valid, axis_window)
+    smoothed_height = _smooth_profile(band_height, valid, height_window)
+    target_height = 0.7 * smoothed_height + 0.3 * median_height
+    target_height = np.clip(target_height, median_height * 0.82, median_height * 1.18)
+    regularized_axis = 0.75 * smoothed_axis + 0.25 * _smooth_profile(axis, valid, axis_window)
+    regularized_top = regularized_axis - target_height * 0.5
+    regularized_bottom = regularized_axis + target_height * 0.5
+    regularized_top = _smooth_profile(regularized_top, valid, height_window)
+    regularized_bottom = _smooth_profile(regularized_bottom, valid, height_window)
+    regularized_axis = _smooth_profile((regularized_top + regularized_bottom) * 0.5, valid, axis_window)
+    return regularized_top, regularized_axis, regularized_bottom
 
 
 def _weighted_seam_risk_map(

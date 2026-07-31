@@ -585,6 +585,23 @@ def test_strip_estimate_rejects_columns_with_spikes_and_weak_support() -> None:
     assert strip.measurements["rectification_column_fraction"] < 1.0
 
 
+def test_strip_estimate_regularizes_local_band_height_kinks() -> None:
+    coverage = np.zeros((80, 60), np.uint8)
+    for x in range(60):
+        top = 14 + x // 20
+        bottom = 54 + x // 20
+        if 26 <= x <= 32:
+            bottom += 10
+        coverage[top:bottom + 1, x] = 255
+
+    strip = estimate_strip(coverage, min_column_fraction=0.8, smoothing_window=9, max_axis_step=5.0)
+
+    assert strip is not None
+    heights = strip.bottom - strip.top
+    assert float(np.max(heights) - np.min(heights)) < 12.0
+    assert strip.max_bottom_step < 6.0
+
+
 def test_cylinder_builder_prefers_baseline_planar_mosaic_over_angular_mosaic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
