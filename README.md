@@ -168,7 +168,7 @@ All parameters can be set through `PanoramaConfig`, a JSON config file, or parti
 * `enable_final_sharpening` - applies a final mild unsharp-mask pass to the completed panorama. Default: `True`.
 * `final_sharpen_strength` - strength of the final panorama sharpening pass. Default: `0.15`.
 * `final_sharpen_sigma` - Gaussian sigma used by the final panorama sharpening pass. Default: `1.0`.
-* `save_debug_artifacts` - saves a debug directory with the effective config and run report. Default: `True`.
+* `save_debug_artifacts` - saves a debug directory with the effective config and run report. Works for both `build` and `unwrap`. Default: `True`.
 
 ### Full Config Example
 
@@ -247,6 +247,22 @@ All parameters can be set through `PanoramaConfig`, a JSON config file, or parti
 ```bash
 panoramator build VID_20260709_140742.mp4 output.png
 ```
+
+Observed-surface unwrap uses a separate command. It writes the final PNG beside a debug directory named `*_debug` with `run.json`, `effective_config.json`, coverage, source/error maps, and intermediate mosaics:
+
+```bash
+panoramator unwrap VID20260729124935.mp4 surface.png --surface auto --allow-partial
+```
+
+When you need a cleaner crop of the observed band, enable `photo-mode` for unwrap too:
+
+```bash
+panoramator unwrap VID20260729124935.mp4 surface.png --surface auto --allow-partial --photo-mode --photo-crop-margin-px 5
+```
+
+`unwrap` now accepts a JSON config plus focused overrides such as `--sampling-step`, `--max-frames`, `--blur-threshold`, `--max-mosaic-boundary-mean-error`, and other rectification/gate parameters, mirroring the style of `build`.
+
+To suppress debug output for either command, pass `--no-save-debug-artifacts`.
 
 For videos where the fixed blur threshold is too strict:
 

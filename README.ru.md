@@ -169,7 +169,7 @@ pytest -q
 * `enable_final_sharpening` - включает мягкий финальный unsharp mask для уже собранной панорамы. По умолчанию `True`.
 * `final_sharpen_strength` - сила финального sharpening. По умолчанию `0.15`.
 * `final_sharpen_sigma` - sigma размытия внутри финального sharpening. По умолчанию `1.0`.
-* `save_debug_artifacts` - сохраняет debug-директорию с effective config и отчётом запуска. По умолчанию `True`.
+* `save_debug_artifacts` - сохраняет debug-директорию с effective config и отчётом запуска. Работает и для `build`, и для `unwrap`. По умолчанию `True`.
 
 ### Пример полного конфига
 
@@ -248,6 +248,22 @@ pytest -q
 ```bash
 panoramator build VID_20260709_140742.mp4 output.png
 ```
+
+Для развёртки наблюдаемой поверхности используйте отдельную команду `unwrap`. Рядом с итоговым PNG она создаёт debug-директорию `*_debug` с `run.json`, `effective_config.json`, coverage, source/error map и промежуточными mosaic-артефактами:
+
+```bash
+panoramator unwrap VID20260729124935.mp4 surface.png --surface auto --allow-partial
+```
+
+Если нужна более строгая подрезка только по реально видимой полосе, включите `photo-mode` и для `unwrap`:
+
+```bash
+panoramator unwrap VID20260729124935.mp4 surface.png --surface auto --allow-partial --photo-mode --photo-crop-margin-px 5
+```
+
+`unwrap` теперь принимает JSON-конфиг и точечные overrides в том же стиле, что и `build`: например `--sampling-step`, `--max-frames`, `--blur-threshold`, `--max-mosaic-boundary-mean-error` и параметры quality gate / rectification.
+
+Чтобы отключить debug-артефакты для любой из команд, используйте `--no-save-debug-artifacts`.
 
 Для видео, где фиксированный порог резкости слишком строгий:
 
