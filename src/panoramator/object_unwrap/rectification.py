@@ -13,6 +13,9 @@ class QualityGateResult:
     mean_boundary_error: float
     severe_boundary_fraction: float
     severe_boundary_footprint: float
+    weighted_seam_risk: float
+    weighted_seam_footprint: float
+    seam_risk_map: np.ndarray
 
     @property
     def measurements(self) -> dict[str, float | int]:
@@ -22,6 +25,8 @@ class QualityGateResult:
             "quality_gate_mean_boundary_error": self.mean_boundary_error,
             "quality_gate_severe_boundary_fraction": self.severe_boundary_fraction,
             "quality_gate_severe_boundary_footprint": self.severe_boundary_footprint,
+            "quality_gate_weighted_seam_risk": self.weighted_seam_risk,
+            "quality_gate_weighted_seam_footprint": self.weighted_seam_footprint,
         }
 
 
@@ -49,6 +54,7 @@ class StripEstimate:
 
 
 def evaluate_mosaic_quality(
+    image: np.ndarray,
     coverage: np.ndarray,
     source_map: np.ndarray,
     error_map: np.ndarray,
@@ -68,22 +74,37 @@ def evaluate_mosaic_quality(
     boundary_pixels = int(boundary_mask.sum())
     occupied_pixels = int(occupied.sum())
     if boundary_pixels == 0 or occupied_pixels == 0:
-        return QualityGateResult(True, 0.0, 0.0, 0.0, 0.0)
+        return QualityGateResult(True, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, np.zeros_like(coverage, dtype=np.uint8))
     errors = error_map[boundary_mask].astype(np.float32)
     mean_boundary_error = float(np.mean(errors))
     severe_boundary_fraction = float(np.count_nonzero(errors >= severe_error_threshold) / max(boundary_pixels, 1))
     boundary_fraction = float(boundary_pixels / occupied_pixels)
     severe_boundary_footprint = boundary_fraction * severe_boundary_fraction
+    seam_risk_map, weighted_seam_risk = _weighted_seam_risk_map(
+        image,
+        occupied,
+        boundary_mask,
+        error_map,
+        severe_error_threshold,
+    )
+    weighted_seam_footprint = boundary_fraction * weighted_seam_risk
     return QualityGateResult(
         passed=(
             mean_boundary_error <= max_mean_boundary_error
-            and severe_boundary_fraction <= max_severe_boundary_fraction
             and severe_boundary_footprint <= max_severe_boundary_footprint
+            and weighted_seam_footprint <= max_severe_boundary_footprint
+            and (
+                severe_boundary_fraction <= max_severe_boundary_fraction
+                or weighted_seam_footprint <= max_severe_boundary_footprint * 0.75
+            )
         ),
         boundary_fraction=boundary_fraction,
         mean_boundary_error=mean_boundary_error,
         severe_boundary_fraction=severe_boundary_fraction,
         severe_boundary_footprint=severe_boundary_footprint,
+        weighted_seam_risk=weighted_seam_risk,
+        weighted_seam_footprint=weighted_seam_footprint,
+        seam_risk_map=seam_risk_map,
     )
 
 
@@ -219,3 +240,34 @@ def _filter_support_columns(top: np.ndarray, bottom: np.ndarray, valid: np.ndarr
     filtered &= top_step <= step_tolerance
     filtered &= bottom_step <= step_tolerance
     return filtered
+
+
+def _weighted_seam_risk_map(
+    image: np.ndarray,
+    occupied: np.ndarray,
+    boundary_mask: np.ndarray,
+    error_map: np.ndarray,
+    severe_error_threshold: float,
+) -> tuple[np.ndarray, float]:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    gradient_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gradient_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    gradient = cv2.magnitude(gradient_x, gradient_y)
+    detail = np.zeros_like(gradient, dtype=np.float32)
+    occupied_gradient = gradient[occupied]
+    if occupied_gradient.size:
+        scale = max(float(np.percentile(occupied_gradient, 95)), 1.0)
+        detail[occupied] = np.clip(occupied_gradient / scale, 0.0, 1.0)
+    boundary_float = boundary_mask.astype(np.float32)
+    severe_map = ((error_map.astype(np.float32) >= severe_error_threshold) & boundary_mask).astype(np.float32)
+    local_boundary_density = cv2.GaussianBlur(boundary_float, (0, 0), sigmaX=6.0, sigmaY=6.0)
+    local_severe_density = cv2.GaussianBlur(severe_map, (0, 0), sigmaX=10.0, sigmaY=10.0)
+    error_weight = np.clip(error_map.astype(np.float32) / max(float(severe_error_threshold), 1.0), 0.0, 2.0)
+    risk = error_weight * (0.35 + 0.65 * detail) * (0.4 + 0.6 * np.clip(local_boundary_density, 0.0, 1.0))
+    risk *= 0.5 + 0.5 * np.clip(local_severe_density * 4.0, 0.0, 1.0)
+    risk *= boundary_float
+    boundary_values = risk[boundary_mask]
+    weighted_seam_risk = float(np.mean(boundary_values)) if boundary_values.size else 0.0
+    scale = max(float(np.max(boundary_values)) if boundary_values.size else 0.0, 1e-6)
+    risk_map = np.clip(risk / scale * 255.0, 0, 255).astype(np.uint8)
+    return risk_map, weighted_seam_risk

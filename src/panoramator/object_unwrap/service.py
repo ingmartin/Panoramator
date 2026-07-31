@@ -59,6 +59,7 @@ class ObjectUnwrapper:
         surface_coverage = measurements.get("surface_coverage_fraction", coverage_fraction(coverage))
         fraction = float(surface_coverage) if isinstance(surface_coverage, (int, float)) else coverage_fraction(coverage)
         measurements["surface_coverage_fraction"] = fraction
+        measurements.update(analysis.measurements or {})
         measurements["frame_count"] = len(analysis.frames)
         selected = [
             {"frame_index": item.frame.index, "timestamp_seconds": item.frame.timestamp_seconds}
@@ -124,6 +125,7 @@ class ObjectUnwrapper:
             measurements,
             selected_frames=selected,
             validated_frames=selected,
+            rejected_frames=list(analysis.rejected_frames or []),
             output_files=[],
             sampling_step=self.config.sampling_step,
             max_frames=self.config.max_frames,

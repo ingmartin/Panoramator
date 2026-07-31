@@ -87,6 +87,54 @@ def test_analyzer_reports_blur_and_auto_selects_cylindrical(monkeypatch: pytest.
     assert selected.kind is SurfaceKind.CYLINDRICAL
 
 
+def test_analyzer_temporal_decimation_rejects_near_duplicate_frames(monkeypatch: pytest.MonkeyPatch) -> None:
+    base = np.zeros((24, 24, 3), np.uint8)
+    base[:, 4:20] = (80, 140, 220)
+    shifted = base.copy()
+    shifted[:, 8:24] = (30, 200, 90)
+    frames = [
+        Frame(0, 0.0, base.copy()),
+        Frame(1, 1.0, base.copy()),
+        Frame(2, 2.0, shifted.copy()),
+    ]
+    monkeypatch.setattr(analyzer_module, "object_mask", lambda image, minimum: np.ones((24, 24), np.uint8) * 255)
+    monkeypatch.setattr(analyzer_module, "stable_surface_bbox", lambda mask: (2, 2, 20, 20))
+    monkeypatch.setattr(analyzer_module, "publish_surface_mask", lambda mask, bbox: mask.copy())
+    monkeypatch.setattr(analyzer_module, "masked_sharpness", lambda image, mask: 50.0)
+
+    analysis = VideoAnalyzer().analyze(frames, UnwrapConfig())
+
+    assert analysis.status is None
+    assert [item.frame.index for item in analysis.frames] == [0, 2]
+    assert analysis.measurements == {
+        "temporal_decimation_applied": 1,
+        "temporal_decimation_kept_frames": 2,
+        "temporal_decimation_rejected_frames": 1,
+    }
+    assert analysis.rejected_frames is not None
+    assert analysis.rejected_frames[0]["frame_index"] == 1
+    assert analysis.rejected_frames[0]["reason"] == "temporal_decimation_near_duplicate"
+
+
+def test_analyzer_can_disable_temporal_decimation(monkeypatch: pytest.MonkeyPatch) -> None:
+    frame = Frame(0, 0.0, np.zeros((24, 24, 3), np.uint8))
+    frames = [frame, Frame(1, 1.0, frame.image.copy()), Frame(2, 2.0, frame.image.copy())]
+    monkeypatch.setattr(analyzer_module, "object_mask", lambda image, minimum: np.ones((24, 24), np.uint8) * 255)
+    monkeypatch.setattr(analyzer_module, "stable_surface_bbox", lambda mask: (2, 2, 20, 20))
+    monkeypatch.setattr(analyzer_module, "publish_surface_mask", lambda mask, bbox: mask.copy())
+    monkeypatch.setattr(analyzer_module, "masked_sharpness", lambda image, mask: 50.0)
+
+    analysis = VideoAnalyzer().analyze(frames, UnwrapConfig(enable_temporal_decimation=False))
+
+    assert analysis.status is None
+    assert [item.frame.index for item in analysis.frames] == [0, 1, 2]
+    assert analysis.measurements == {
+        "temporal_decimation_applied": 0,
+        "temporal_decimation_kept_frames": 3,
+        "temporal_decimation_rejected_frames": 0,
+    }
+
+
 def test_surface_utility_functions_cover_empty_and_valid_geometry() -> None:
     template = CurvedSurfaceTemplate(width_to_height=2.0)
     assert template.compatibility([]) == 0.0
@@ -418,6 +466,7 @@ def test_unwrap_cli_fails_when_partial_result_has_no_output(monkeypatch: pytest.
 
 
 def test_quality_gate_rejects_high_error_owner_boundaries() -> None:
+    image = np.full((6, 8, 3), 120, np.uint8)
     coverage = np.full((6, 8), 255, np.uint8)
     source = np.zeros((6, 8), np.uint16)
     source[:, :4] = 1
@@ -425,10 +474,28 @@ def test_quality_gate_rejects_high_error_owner_boundaries() -> None:
     error = np.zeros((6, 8), np.uint8)
     error[:, 3:5] = 80
 
-    gate = evaluate_mosaic_quality(coverage, source, error, 20.0, 0.72, 40.0, 0.04)
+    gate = evaluate_mosaic_quality(image, coverage, source, error, 20.0, 0.72, 40.0, 0.04)
 
     assert gate.passed is False
     assert gate.mean_boundary_error >= 40.0
+    assert gate.weighted_seam_footprint > 0.04
+
+
+def test_quality_gate_accepts_localized_boundary_defect_with_small_footprint() -> None:
+    image = np.full((48, 120, 3), 90, np.uint8)
+    image[:, 58:62] = 240
+    coverage = np.full((48, 120), 255, np.uint8)
+    source = np.ones((48, 120), np.uint16)
+    source[20:24, 58:62] = 2
+    error = np.zeros((48, 120), np.uint8)
+    error[20:24, 58:62] = 80
+
+    gate = evaluate_mosaic_quality(image, coverage, source, error, 85.0, 0.20, 40.0, 0.01)
+
+    assert gate.severe_boundary_fraction > 0.20
+    assert gate.severe_boundary_footprint < 0.01
+    assert gate.weighted_seam_footprint < 0.01
+    assert gate.passed is True
 
 
 def test_strip_estimate_and_rectification_straighten_observed_band() -> None:

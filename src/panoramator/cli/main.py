@@ -199,6 +199,14 @@ def unwrap_command(args: argparse.Namespace) -> int:
         config.mosaic_boundary_severe_error = args.mosaic_boundary_severe_error
     if getattr(args, "max_mosaic_boundary_severe_footprint", None) is not None:
         config.max_mosaic_boundary_severe_footprint = args.max_mosaic_boundary_severe_footprint
+    if getattr(args, "no_temporal_decimation", False):
+        config.enable_temporal_decimation = False
+    if getattr(args, "temporal_decimation_max_mask_iou", None) is not None:
+        config.temporal_decimation_max_mask_iou = args.temporal_decimation_max_mask_iou
+    if getattr(args, "temporal_decimation_min_band_difference", None) is not None:
+        config.temporal_decimation_min_band_difference = args.temporal_decimation_min_band_difference
+    if getattr(args, "temporal_decimation_min_bbox_shift", None) is not None:
+        config.temporal_decimation_min_bbox_shift = args.temporal_decimation_min_bbox_shift
     if getattr(args, "min_rectification_column_fraction", None) is not None:
         config.min_rectification_column_fraction = args.min_rectification_column_fraction
     if getattr(args, "rectification_smoothing_window", None) is not None:
@@ -312,6 +320,10 @@ def create_parser() -> argparse.ArgumentParser:
     unwrap.add_argument("--max-mosaic-boundary-severe-fraction", type=float)
     unwrap.add_argument("--mosaic-boundary-severe-error", type=float)
     unwrap.add_argument("--max-mosaic-boundary-severe-footprint", type=float)
+    unwrap.add_argument("--no-temporal-decimation", action="store_true")
+    unwrap.add_argument("--temporal-decimation-max-mask-iou", type=float)
+    unwrap.add_argument("--temporal-decimation-min-band-difference", type=float)
+    unwrap.add_argument("--temporal-decimation-min-bbox-shift", type=float)
     unwrap.add_argument("--min-rectification-column-fraction", type=float)
     unwrap.add_argument("--rectification-smoothing-window", type=int)
     unwrap.add_argument("--max-rectification-axis-step", type=float)

@@ -85,6 +85,10 @@ def _unwrap_args(**overrides) -> argparse.Namespace:
         "max_mosaic_boundary_severe_fraction": None,
         "mosaic_boundary_severe_error": None,
         "max_mosaic_boundary_severe_footprint": None,
+        "no_temporal_decimation": False,
+        "temporal_decimation_max_mask_iou": None,
+        "temporal_decimation_min_band_difference": None,
+        "temporal_decimation_min_bbox_shift": None,
         "min_rectification_column_fraction": None,
         "rectification_smoothing_window": None,
         "max_rectification_axis_step": None,
@@ -263,6 +267,10 @@ def test_unwrap_command_applies_overrides_and_prints_summary(monkeypatch, capsys
         max_mosaic_boundary_severe_fraction=0.8,
         mosaic_boundary_severe_error=44.0,
         max_mosaic_boundary_severe_footprint=0.05,
+        no_temporal_decimation=True,
+        temporal_decimation_max_mask_iou=0.88,
+        temporal_decimation_min_band_difference=0.12,
+        temporal_decimation_min_bbox_shift=0.08,
         min_rectification_column_fraction=0.5,
         rectification_smoothing_window=17,
         max_rectification_axis_step=8.0,
@@ -292,6 +300,10 @@ def test_unwrap_command_applies_overrides_and_prints_summary(monkeypatch, capsys
     assert config.max_mosaic_boundary_severe_fraction == 0.8
     assert config.mosaic_boundary_severe_error == 44.0
     assert config.max_mosaic_boundary_severe_footprint == 0.05
+    assert config.enable_temporal_decimation is False
+    assert config.temporal_decimation_max_mask_iou == 0.88
+    assert config.temporal_decimation_min_band_difference == 0.12
+    assert config.temporal_decimation_min_bbox_shift == 0.08
     assert config.min_rectification_column_fraction == 0.5
     assert config.rectification_smoothing_window == 17
     assert config.max_rectification_axis_step == 8.0

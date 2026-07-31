@@ -91,6 +91,10 @@ class UnwrapConfig:
     max_mosaic_boundary_severe_fraction: float = 0.72
     mosaic_boundary_severe_error: float = 48.0
     max_mosaic_boundary_severe_footprint: float = 0.04
+    enable_temporal_decimation: bool = True
+    temporal_decimation_max_mask_iou: float = 0.94
+    temporal_decimation_min_band_difference: float = 0.05
+    temporal_decimation_min_bbox_shift: float = 0.04
     min_rectification_column_fraction: float = 0.35
     rectification_smoothing_window: int = 31
     max_rectification_axis_step: float = 12.0
@@ -134,6 +138,12 @@ class UnwrapConfig:
             raise ValueError("mosaic_boundary_severe_error must be >= 0")
         if not 0 <= self.max_mosaic_boundary_severe_footprint <= 1:
             raise ValueError("max_mosaic_boundary_severe_footprint must be between 0 and 1")
+        if not 0 <= self.temporal_decimation_max_mask_iou <= 1:
+            raise ValueError("temporal_decimation_max_mask_iou must be between 0 and 1")
+        if not 0 <= self.temporal_decimation_min_band_difference <= 1:
+            raise ValueError("temporal_decimation_min_band_difference must be between 0 and 1")
+        if self.temporal_decimation_min_bbox_shift < 0:
+            raise ValueError("temporal_decimation_min_bbox_shift must be >= 0")
         if not 0 < self.min_rectification_column_fraction <= 1:
             raise ValueError("min_rectification_column_fraction must be between 0 and 1")
         if self.rectification_smoothing_window < 3:

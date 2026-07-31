@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import cv2
 import numpy as np
 
 from panoramator.domain.models import Frame
@@ -26,6 +27,8 @@ class Analysis:
     status: UnwrapStatus | None = None
     message: str = ""
     recommendation: str = ""
+    rejected_frames: list[dict[str, float | int | str]] | None = None
+    measurements: dict[str, float | int] | None = None
 
 
 class VideoAnalyzer:
@@ -58,10 +61,91 @@ class VideoAnalyzer:
             return Analysis([], config.surface_kind, UnwrapStatus.EXCESSIVE_MOTION_BLUR,
                             "Too few sharp frames are available for a reliable texture.",
                             "Move more slowly and keep focus fixed.")
+        selected, rejected, decimation_measurements = self._temporal_decimation(sharp, config)
+        if len(selected) < 2:
+            selected = [sharp[0], sharp[-1]]
         kind = config.surface_kind
         if kind is SurfaceKind.AUTO:
             # A stable near-rectangular silhouette selects the developable model;
             # ambiguous footage uses the conservative curved-surface fallback.
-            ratios = [item.bbox[2] / max(item.bbox[3], 1) for item in sharp]
+            ratios = [item.bbox[2] / max(item.bbox[3], 1) for item in selected]
             kind = SurfaceKind.CYLINDRICAL if 0.45 <= float(np.median(ratios)) <= 1.65 else SurfaceKind.CURVED
-        return Analysis(sharp, kind)
+        return Analysis(selected, kind, rejected_frames=rejected, measurements=decimation_measurements)
+
+    def _temporal_decimation(
+        self,
+        frames: list[AnalyzedFrame],
+        config: UnwrapConfig,
+    ) -> tuple[list[AnalyzedFrame], list[dict[str, float | int | str]], dict[str, float | int]]:
+        if not config.enable_temporal_decimation or len(frames) <= 2:
+            return frames, [], {
+                "temporal_decimation_applied": int(config.enable_temporal_decimation),
+                "temporal_decimation_kept_frames": len(frames),
+                "temporal_decimation_rejected_frames": 0,
+            }
+        selected = [frames[0]]
+        rejected: list[dict[str, float | int | str]] = []
+        last_thumbnail, last_mask = _band_thumbnail(frames[0])
+        for item in frames[1:]:
+            thumbnail, mask = _band_thumbnail(item)
+            mask_iou = _mask_iou(last_mask, mask)
+            band_difference = _band_difference(last_thumbnail, last_mask, thumbnail, mask)
+            bbox_shift = _bbox_shift_ratio(selected[-1].bbox, item.bbox)
+            if (
+                mask_iou >= config.temporal_decimation_max_mask_iou
+                and band_difference <= config.temporal_decimation_min_band_difference
+                and bbox_shift <= config.temporal_decimation_min_bbox_shift
+            ):
+                rejected.append(
+                    {
+                        "frame_index": item.frame.index,
+                        "timestamp_seconds": item.frame.timestamp_seconds,
+                        "reason": "temporal_decimation_near_duplicate",
+                        "mask_iou": mask_iou,
+                        "band_difference": band_difference,
+                        "bbox_shift_ratio": bbox_shift,
+                    }
+                )
+                continue
+            selected.append(item)
+            last_thumbnail, last_mask = thumbnail, mask
+        if len(selected) < 2 and len(frames) >= 2:
+            selected = [frames[0], frames[-1]]
+            rejected = rejected[:-1] if rejected else rejected
+        return selected, rejected, {
+            "temporal_decimation_applied": 1,
+            "temporal_decimation_kept_frames": len(selected),
+            "temporal_decimation_rejected_frames": len(rejected),
+        }
+
+
+def _band_thumbnail(item: AnalyzedFrame) -> tuple[np.ndarray, np.ndarray]:
+    x, y, width, height = item.bbox
+    patch = item.frame.image[y : y + height, x : x + width]
+    patch_mask = item.publish_mask[y : y + height, x : x + width]
+    gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+    resized = cv2.resize(gray, (96, 64), interpolation=cv2.INTER_AREA)
+    resized_mask = cv2.resize(patch_mask, (96, 64), interpolation=cv2.INTER_NEAREST)
+    resized[resized_mask == 0] = 0
+    return resized.astype(np.float32), resized_mask > 0
+
+
+def _mask_iou(left: np.ndarray, right: np.ndarray) -> float:
+    union = left | right
+    if not np.any(union):
+        return 0.0
+    return float(np.count_nonzero(left & right) / np.count_nonzero(union))
+
+
+def _band_difference(left: np.ndarray, left_mask: np.ndarray, right: np.ndarray, right_mask: np.ndarray) -> float:
+    overlap = left_mask & right_mask
+    if not np.any(overlap):
+        return 1.0
+    return float(np.mean(np.abs(left[overlap] - right[overlap])) / 255.0)
+
+
+def _bbox_shift_ratio(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> float:
+    left_center = left[0] + left[2] * 0.5
+    right_center = right[0] + right[2] * 0.5
+    mean_width = max((left[2] + right[2]) * 0.5, 1.0)
+    return float(abs(right_center - left_center) / mean_width)

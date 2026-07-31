@@ -129,6 +129,7 @@ class CylinderUnwrapBuilder:
             # only; it is exactly the path that produced visible ghosting.
             mosaic, mosaic_coverage, mosaic_source, mosaic_error = planar_mosaic
             gate = evaluate_mosaic_quality(
+                mosaic,
                 mosaic_coverage,
                 mosaic_source,
                 mosaic_error,
@@ -143,6 +144,7 @@ class CylinderUnwrapBuilder:
                     "mosaic_coverage": mosaic_coverage,
                     "mosaic_source": mosaic_source,
                     "mosaic_error": mosaic_error,
+                    "mosaic_seam_risk": gate.seam_risk_map,
                 }
             )
             if gate.passed and trajectory.accepted_pairs:
