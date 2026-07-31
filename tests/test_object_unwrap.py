@@ -14,6 +14,7 @@ from panoramator.object_unwrap.cylinder.pose import solve_monotonic_trajectory
 from panoramator.object_unwrap.diagnostics import write_artifacts
 from panoramator.object_unwrap.image_pose_graph import build_image_pose_graph
 from panoramator.object_unwrap.models import (
+    PublishProfile,
     SurfaceKind,
     UnwrapConfig,
     UnwrapDiagnostics,
@@ -92,6 +93,7 @@ def test_unwrap_config_limits_source_map_frame_ids() -> None:
 def test_unwrap_config_json_round_trip_normalizes_surface_kind(tmp_path) -> None:
     config = UnwrapConfig(
         surface_kind=SurfaceKind.CYLINDRICAL,
+        publish_profile=PublishProfile.COVERAGE_FIRST,
         allow_partial=True,
         photo_mode=True,
         crop_result=True,
@@ -105,6 +107,7 @@ def test_unwrap_config_json_round_trip_normalizes_surface_kind(tmp_path) -> None
 
     assert loaded == config
     assert loaded.to_dict()["surface_kind"] == "cylindrical"
+    assert loaded.to_dict()["publish_profile"] == "coverage_first"
 
 
 @pytest.mark.parametrize(

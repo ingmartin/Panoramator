@@ -7,6 +7,7 @@ from panoramator.application.use_cases import PanoramaBuilder
 from panoramator.config.models import PanoramaConfig
 from panoramator.object_unwrap import (
     ObjectUnwrapper,
+    PublishProfile,
     SurfaceKind,
     UnwrapConfig,
     UnwrapStatus,
@@ -161,6 +162,8 @@ def unwrap_command(args: argparse.Namespace) -> int:
 
     if getattr(args, "surface_kind", None) is not None:
         config.surface_kind = SurfaceKind(args.surface_kind)
+    if getattr(args, "publish_profile", None) is not None:
+        config.publish_profile = PublishProfile(args.publish_profile)
     if getattr(args, "allow_partial", False):
         config.allow_partial = True
     if getattr(args, "sampling_step", None) is not None:
@@ -307,6 +310,7 @@ def create_parser() -> argparse.ArgumentParser:
     unwrap.add_argument("output_path")
     unwrap.add_argument("--config")
     unwrap.add_argument("--surface", dest="surface_kind", choices=[kind.value for kind in SurfaceKind], default="auto")
+    unwrap.add_argument("--publish-profile", choices=[profile.value for profile in PublishProfile])
     unwrap.add_argument("--allow-partial", action="store_true")
     unwrap.add_argument("--sampling-step", type=int)
     unwrap.add_argument("--max-frames", type=int)

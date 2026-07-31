@@ -1,4 +1,5 @@
 from .models import (
+    PublishProfile,
     SurfaceKind,
     SurfaceModel,
     UnwrapConfig,
@@ -8,4 +9,13 @@ from .models import (
 )
 from .service import ObjectUnwrapper
 
-__all__ = ["ObjectUnwrapper", "SurfaceKind", "SurfaceModel", "UnwrapConfig", "UnwrapDiagnostics", "UnwrapResult", "UnwrapStatus"]
+__all__ = [
+    "ObjectUnwrapper",
+    "PublishProfile",
+    "SurfaceKind",
+    "SurfaceModel",
+    "UnwrapConfig",
+    "UnwrapDiagnostics",
+    "UnwrapResult",
+    "UnwrapStatus",
+]

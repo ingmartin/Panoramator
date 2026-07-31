@@ -13,6 +13,7 @@ class QualityGateResult:
     mean_boundary_error: float
     severe_boundary_fraction: float
     severe_boundary_footprint: float
+    saliency_weighted_error: float
     weighted_seam_risk: float
     weighted_seam_footprint: float
     anchor_conflict_score: float
@@ -20,7 +21,9 @@ class QualityGateResult:
     owner_instability_score: float
     seam_risk_map: np.ndarray
     saliency_map: np.ndarray
+    saliency_error_map: np.ndarray
     overlap_conflict_map: np.ndarray
+    owner_transition_map: np.ndarray
     owner_instability_map: np.ndarray
     boundary_map: np.ndarray
 
@@ -32,6 +35,7 @@ class QualityGateResult:
             "quality_gate_mean_boundary_error": self.mean_boundary_error,
             "quality_gate_severe_boundary_fraction": self.severe_boundary_fraction,
             "quality_gate_severe_boundary_footprint": self.severe_boundary_footprint,
+            "quality_gate_saliency_weighted_error": self.saliency_weighted_error,
             "quality_gate_weighted_seam_risk": self.weighted_seam_risk,
             "quality_gate_weighted_seam_footprint": self.weighted_seam_footprint,
             "quality_gate_anchor_conflict_score": self.anchor_conflict_score,
@@ -93,6 +97,9 @@ def evaluate_mosaic_quality(
             0.0,
             0.0,
             0.0,
+            0.0,
+            empty,
+            empty,
             empty,
             empty,
             empty,
@@ -105,6 +112,12 @@ def evaluate_mosaic_quality(
     boundary_fraction = float(boundary_pixels / occupied_pixels)
     severe_boundary_footprint = boundary_fraction * severe_boundary_fraction
     saliency_map = _saliency_map(image, occupied)
+    saliency_error_map, saliency_weighted_error = _saliency_weighted_error_map(
+        saliency_map,
+        occupied,
+        error_map,
+        severe_error_threshold,
+    )
     seam_risk_map, weighted_seam_risk = _weighted_seam_risk_map(
         saliency_map,
         occupied,
@@ -120,6 +133,10 @@ def evaluate_mosaic_quality(
         severe_error_threshold,
     )
     anchor_conflict_footprint = boundary_fraction * anchor_conflict_score
+    owner_transition_map, _owner_transition_score = _owner_transition_map(
+        occupied,
+        boundary_mask,
+    )
     owner_instability_map, owner_instability_score = _owner_instability_map(
         saliency_map,
         occupied,
@@ -141,6 +158,7 @@ def evaluate_mosaic_quality(
         mean_boundary_error=mean_boundary_error,
         severe_boundary_fraction=severe_boundary_fraction,
         severe_boundary_footprint=severe_boundary_footprint,
+        saliency_weighted_error=saliency_weighted_error,
         weighted_seam_risk=weighted_seam_risk,
         weighted_seam_footprint=weighted_seam_footprint,
         anchor_conflict_score=anchor_conflict_score,
@@ -148,7 +166,9 @@ def evaluate_mosaic_quality(
         owner_instability_score=owner_instability_score,
         seam_risk_map=seam_risk_map,
         saliency_map=saliency_map,
+        saliency_error_map=saliency_error_map,
         overlap_conflict_map=overlap_conflict_map,
+        owner_transition_map=owner_transition_map,
         owner_instability_map=owner_instability_map,
         boundary_map=(boundary_mask.astype(np.uint8) * 255),
     )
@@ -243,6 +263,7 @@ def rectify_mosaic(
     rectified_coverage = np.where(rectified_coverage > 0, 255, 0).astype(np.uint8)
     rectified_source = rectified_source.astype(source_map.dtype, copy=False)
     rectified_error = rectified_error.astype(error_map.dtype, copy=False)
+    rectified_source = _stabilize_rectified_source(rectified, rectified_coverage, rectified_source, rectified_error)
     rectified[rectified_coverage == 0] = 0
     rectified_source[rectified_coverage == 0] = 0
     rectified_error[rectified_coverage == 0] = 0
@@ -363,6 +384,21 @@ def _weighted_seam_risk_map(
     return risk_map, weighted_seam_risk
 
 
+def _saliency_weighted_error_map(
+    saliency_map: np.ndarray,
+    occupied: np.ndarray,
+    error_map: np.ndarray,
+    severe_error_threshold: float,
+) -> tuple[np.ndarray, float]:
+    detail = saliency_map.astype(np.float32) / 255.0
+    error_weight = np.clip(error_map.astype(np.float32) / max(float(severe_error_threshold), 1.0), 0.0, 2.0)
+    weighted_error = error_weight * (0.2 + 0.8 * detail) * occupied.astype(np.float32)
+    occupied_values = weighted_error[occupied]
+    score = float(np.mean(occupied_values)) if occupied_values.size else 0.0
+    scale = max(float(np.max(occupied_values)) if occupied_values.size else 0.0, 1e-6)
+    return np.clip(weighted_error / scale * 255.0, 0, 255).astype(np.uint8), score
+
+
 def _overlap_conflict_map(
     saliency_map: np.ndarray,
     boundary_mask: np.ndarray,
@@ -395,6 +431,74 @@ def _owner_instability_map(
     score = float(np.mean(occupied_values)) if occupied_values.size else 0.0
     scale = max(float(np.max(occupied_values)) if occupied_values.size else 0.0, 1e-6)
     return np.clip(instability / scale * 255.0, 0, 255).astype(np.uint8), score
+
+
+def _owner_transition_map(
+    occupied: np.ndarray,
+    boundary_mask: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    boundary_float = boundary_mask.astype(np.float32)
+    transition_density = cv2.GaussianBlur(boundary_float, (0, 0), sigmaX=3.0, sigmaY=3.0)
+    transition_density *= occupied.astype(np.float32)
+    occupied_values = transition_density[occupied]
+    score = float(np.mean(occupied_values)) if occupied_values.size else 0.0
+    scale = max(float(np.max(occupied_values)) if occupied_values.size else 0.0, 1e-6)
+    return np.clip(transition_density / scale * 255.0, 0, 255).astype(np.uint8), score
+
+
+def _stabilize_rectified_source(
+    image: np.ndarray,
+    coverage: np.ndarray,
+    source_map: np.ndarray,
+    error_map: np.ndarray,
+) -> np.ndarray:
+    occupied = coverage > 0
+    if not np.any(occupied):
+        return source_map
+    stabilized = source_map.copy()
+    saliency = _saliency_map(image, occupied).astype(np.float32) / 255.0
+    error_weight = np.clip(error_map.astype(np.float32) / 48.0, 0.0, 1.5)
+    for _ in range(2):
+        _occupied, boundary = _boundary_mask(stabilized, coverage)
+        candidates = boundary & occupied & (saliency < 0.75)
+        if not np.any(candidates):
+            break
+        next_map = stabilized.copy()
+        ys, xs = np.where(candidates)
+        for y, x in zip(ys.tolist(), xs.tolist(), strict=False):
+            y0, y1 = max(0, y - 1), min(stabilized.shape[0], y + 2)
+            x0, x1 = max(0, x - 2), min(stabilized.shape[1], x + 3)
+            patch = stabilized[y0:y1, x0:x1]
+            patch_occupied = occupied[y0:y1, x0:x1]
+            owners = patch[patch_occupied]
+            owners = owners[owners > 0]
+            if owners.size < 3:
+                continue
+            unique, counts = np.unique(owners, return_counts=True)
+            majority_index = int(np.argmax(counts))
+            majority_owner = unique[majority_index]
+            majority_fraction = float(counts[majority_index] / owners.size)
+            if majority_owner == stabilized[y, x]:
+                continue
+            row_patch = stabilized[y, x0:x1]
+            row_owners = row_patch[row_patch > 0]
+            if row_owners.size:
+                row_unique, row_counts = np.unique(row_owners, return_counts=True)
+                row_majority_owner = row_unique[int(np.argmax(row_counts))]
+                row_majority_fraction = float(np.max(row_counts) / row_owners.size)
+            else:
+                row_majority_owner = majority_owner
+                row_majority_fraction = majority_fraction
+            if majority_fraction < 0.55 and row_majority_fraction < 0.6:
+                continue
+            preferred_owner = row_majority_owner if row_majority_owner != stabilized[y, x] and row_majority_fraction >= 0.6 else majority_owner
+            if saliency[y, x] * (0.5 + error_weight[y, x]) > 0.55:
+                continue
+            next_map[y, x] = preferred_owner
+        if np.array_equal(next_map, stabilized):
+            break
+        stabilized = next_map
+    return stabilized
 
 
 def _effective_band_width(band_height: np.ndarray, valid: np.ndarray) -> float:

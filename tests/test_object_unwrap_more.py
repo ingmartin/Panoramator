@@ -21,6 +21,7 @@ from panoramator.object_unwrap.cylinder.mapper import (
 )
 from panoramator.object_unwrap.diagnostics import write_artifacts
 from panoramator.object_unwrap.models import (
+    PublishProfile,
     SurfaceKind,
     SurfaceModel,
     UnwrapConfig,
@@ -375,7 +376,7 @@ def test_builder_without_global_pose_uses_feature_shift_fallback(monkeypatch: py
     frames = [_analyzed_frame(0), _analyzed_frame(1), _analyzed_frame(2)]
     monkeypatch.setattr(builder_module, "fit_cylinder", lambda frames: type("Fit", (), {"model": SurfaceModel(SurfaceKind.CYLINDRICAL), "boxes": [item.bbox for item in frames]})())
     monkeypatch.setattr(builder_module, "build_image_pose_graph", lambda frames: type("Graph", (), {"edges": [], "valid_edges": 0})())
-    monkeypatch.setattr(builder_module, "build_planar_mosaic", lambda frames, edges, output_height: None)
+    monkeypatch.setattr(builder_module, "build_planar_mosaic", lambda frames, edges, output_height, publish_profile: None)
     monkeypatch.setattr(builder_module, "normalized_wall", lambda image, mask, bbox, output_height: (np.zeros((output_height, 32, 3), np.uint8), np.ones((output_height, 32), np.uint8) * 255))
     monkeypatch.setattr(builder_module, "central_band", lambda image, mask, ratio: (image, mask))
     monkeypatch.setattr(builder_module, "angular_increment", lambda *args: (0.01, 0.1))
@@ -1137,6 +1138,9 @@ def test_quality_gate_reports_owner_instability_and_boundary_maps() -> None:
     gate = evaluate_mosaic_quality(image, coverage, source, error, 80.0, 0.8, 40.0, 0.2)
 
     assert gate.owner_instability_score > 0.0
+    assert gate.saliency_weighted_error > 0.0
+    assert np.count_nonzero(gate.saliency_error_map) > 0
+    assert np.count_nonzero(gate.owner_transition_map) > 0
     assert np.count_nonzero(gate.owner_instability_map) > 0
     assert np.count_nonzero(gate.boundary_map) > 0
     assert np.count_nonzero(gate.seam_risk_map) > 0
@@ -1198,7 +1202,8 @@ def test_planar_mosaic_prefers_stronger_overlap_and_records_conflict_error() -> 
     image, coverage, owner, error = mosaic
     assert np.all(coverage == 255)
     assert np.all(owner == 2)
-    assert np.all(image == 180)
+    assert np.all(image > 20)
+    assert np.all(image < 180)
     assert int(error.max()) > 0
 
 
@@ -1237,7 +1242,7 @@ def test_planar_mosaic_keeps_existing_owner_on_high_detail_conflict_without_clea
     assert int(error[:, 6:9].max()) > 0
 
 
-def test_planar_mosaic_replaces_owner_when_gain_is_clear_on_smooth_region() -> None:
+def test_planar_mosaic_blends_smooth_region_while_switching_owner() -> None:
     left = np.full((12, 12, 3), 40, np.uint8)
     right = np.full((12, 12, 3), 200, np.uint8)
     mask = np.full((12, 12), 255, np.uint8)
@@ -1265,7 +1270,81 @@ def test_planar_mosaic_replaces_owner_when_gain_is_clear_on_smooth_region() -> N
     image, coverage, owner, _error = mosaic
     assert np.all(coverage == 255)
     assert np.all(owner == 2)
-    assert np.all(image == 200)
+    assert np.all(image > 40)
+    assert np.all(image < 200)
+
+
+def test_planar_mosaic_publish_profiles_trade_blending_for_cleaner_seams() -> None:
+    left = np.full((12, 12, 3), 80, np.uint8)
+    left[:, 5:7] = 160
+    left = cv2.GaussianBlur(left, (5, 5), 0)
+    right = np.full((12, 12, 3), 200, np.uint8)
+    mask = np.full((12, 12), 255, np.uint8)
+    frames = [
+        AnalyzedFrame(Frame(0, 0.0, left), mask, mask.copy(), 1.0, (0, 0, 12, 12)),
+        AnalyzedFrame(Frame(1, 1.0, right), mask, mask.copy(), 4.0, (0, 0, 12, 12)),
+    ]
+    edges = [
+        {
+            "left_frame": 0,
+            "right_frame": 1,
+            "reason": "ok",
+            "a00": 1.0,
+            "a01": 0.0,
+            "a02": 0.0,
+            "a10": 0.0,
+            "a11": 1.0,
+            "a12": 0.0,
+        }
+    ]
+
+    conservative = build_planar_mosaic(frames, edges, output_height=12, publish_profile=PublishProfile.CONSERVATIVE)
+    coverage_first = build_planar_mosaic(frames, edges, output_height=12, publish_profile=PublishProfile.COVERAGE_FIRST)
+
+    assert conservative is not None
+    assert coverage_first is not None
+    conservative_image, _coverage, conservative_owner, _error = conservative
+    coverage_first_image, _coverage, coverage_first_owner, _error = coverage_first
+    assert np.all(conservative_owner == 2)
+    assert np.all(coverage_first_owner == 2)
+    assert np.all(conservative_image[:, 2] == 200)
+    assert np.all(coverage_first_image[:, 2] < conservative_image[:, 2])
+    assert np.all(coverage_first_image[:, 2] > 80)
+    assert np.all(coverage_first_image[:, 2] < 200)
+
+
+def test_planar_mosaic_keeps_owner_like_publication_on_anchor_detail() -> None:
+    left = np.full((18, 18, 3), 230, np.uint8)
+    right = left.copy()
+    left[:, 8:10] = 0
+    right[:, 7:9] = 255
+    mask = np.full((18, 18), 255, np.uint8)
+    frames = [
+        AnalyzedFrame(Frame(0, 0.0, left), mask, mask.copy(), 1.0, (0, 0, 18, 18)),
+        AnalyzedFrame(Frame(1, 1.0, right), mask, mask.copy(), 1.04, (0, 0, 18, 18)),
+    ]
+    edges = [
+        {
+            "left_frame": 0,
+            "right_frame": 1,
+            "reason": "ok",
+            "a00": 1.0,
+            "a01": 0.0,
+            "a02": 0.0,
+            "a10": 0.0,
+            "a11": 1.0,
+            "a12": 0.0,
+        }
+    ]
+
+    mosaic = build_planar_mosaic(frames, edges, output_height=18)
+
+    assert mosaic is not None
+    image, coverage, owner, _error = mosaic
+    assert np.all(coverage == 255)
+    assert np.all(owner[:, 9] == 1)
+    assert np.all(image[:, 9] == 0)
+    assert np.all(image[:, 8] != 128)
 
 
 def test_planar_mosaic_prefers_existing_owner_inside_stable_detail_patch() -> None:
@@ -1405,6 +1484,53 @@ def test_rectification_uses_effective_band_width_for_local_scale_normalization()
     assert right_support > left_support
 
 
+def test_rectification_stabilizes_isolated_owner_sliver_after_warp() -> None:
+    height, width = 40, 18
+    image = np.full((height, width, 3), 180, np.uint8)
+    coverage = np.zeros((height, width), np.uint8)
+    coverage[8:32, :] = 255
+    source = np.ones((height, width), np.uint16)
+    source[8:32, 9] = 2
+    error = np.zeros((height, width), np.uint8)
+    error[8:32, 8:11] = 70
+    strip = estimate_strip(coverage, min_column_fraction=0.8, smoothing_window=7, max_axis_step=4.0)
+
+    assert strip is not None
+    _rectified, rectified_coverage, rectified_source, _rectified_error = rectify_mosaic(
+        image, coverage, source, error, strip, output_height=24
+    )
+
+    occupied = rectified_coverage > 0
+    assert occupied.any()
+    center_column = rectified_source[:, rectified_source.shape[1] // 2]
+    center_column = center_column[center_column > 0]
+    assert center_column.size > 0
+    assert np.all(center_column == 1)
+
+
+def test_rectification_preserves_owner_boundary_on_anchor_detail() -> None:
+    height, width = 48, 20
+    image = np.full((height, width, 3), 200, np.uint8)
+    image[10:38, 9:11] = 0
+    coverage = np.zeros((height, width), np.uint8)
+    coverage[8:40, :] = 255
+    source = np.ones((height, width), np.uint16)
+    source[:, 10:] = 2
+    error = np.zeros((height, width), np.uint8)
+    error[:, 9:11] = 52
+    strip = estimate_strip(coverage, min_column_fraction=0.8, smoothing_window=7, max_axis_step=4.0)
+
+    assert strip is not None
+    _rectified, rectified_coverage, rectified_source, _rectified_error = rectify_mosaic(
+        image, coverage, source, error, strip, output_height=30
+    )
+
+    occupied = rectified_coverage > 0
+    transitions = rectified_source[:, 1:] != rectified_source[:, :-1]
+    anchor_band = occupied[:, 1:] & occupied[:, :-1] & transitions
+    assert np.count_nonzero(anchor_band) > 0
+
+
 def test_cylinder_builder_prefers_baseline_planar_mosaic_over_angular_mosaic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1422,7 +1548,12 @@ def test_cylinder_builder_prefers_baseline_planar_mosaic_over_angular_mosaic(
     monkeypatch.setattr(
         builder_module,
         "build_planar_mosaic",
-        lambda frames, edges, output_height: (baseline.copy(), baseline_coverage.copy(), baseline_source.copy(), baseline_error.copy()),
+        lambda frames, edges, output_height, publish_profile: (
+            baseline.copy(),
+            baseline_coverage.copy(),
+            baseline_source.copy(),
+            baseline_error.copy(),
+        ),
     )
     monkeypatch.setattr(
         builder_module.CylinderUnwrapBuilder,
@@ -1467,8 +1598,11 @@ def test_cylinder_builder_prefers_baseline_planar_mosaic_over_angular_mosaic(
     assert np.array_equal(artifacts["angular_mosaic"], ghosted)
     assert artifacts["mosaic_boundary"].shape == baseline_coverage.shape
     assert artifacts["mosaic_saliency"].shape == baseline_coverage.shape
+    assert artifacts["mosaic_saliency_error"].shape == baseline_coverage.shape
     assert artifacts["mosaic_overlap_conflict"].shape == baseline_coverage.shape
+    assert artifacts["mosaic_owner_transition"].shape == baseline_coverage.shape
     assert artifacts["mosaic_owner_instability"].shape == baseline_coverage.shape
     assert measurements["rectification_applied"] == 0
     assert "quality_gate_anchor_conflict_score" in measurements
     assert "quality_gate_owner_instability" in measurements
+    assert "quality_gate_saliency_weighted_error" in measurements

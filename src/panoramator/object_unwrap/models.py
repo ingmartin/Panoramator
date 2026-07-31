@@ -14,6 +14,12 @@ class SurfaceKind(StrEnum):
     CURVED = "curved"
 
 
+class PublishProfile(StrEnum):
+    CONSERVATIVE = "conservative_publish"
+    BALANCED = "balanced_publish"
+    COVERAGE_FIRST = "coverage_first"
+
+
 class UnwrapStatus(StrEnum):
     OK = "ok"
     PARTIAL_SURFACE = "partial_surface"
@@ -72,6 +78,7 @@ class UnwrapResult:
 @dataclass(slots=True)
 class UnwrapConfig:
     surface_kind: SurfaceKind = SurfaceKind.AUTO
+    publish_profile: PublishProfile = PublishProfile.BALANCED
     allow_partial: bool = False
     sampling_step: int = 12
     max_frames: int = 48
@@ -116,6 +123,7 @@ class UnwrapConfig:
     def to_dict(self) -> dict:
         result = asdict(self)
         result["surface_kind"] = self.surface_kind.value
+        result["publish_profile"] = self.publish_profile.value
         return result
 
     def save(self, path: str | Path) -> None:
@@ -123,6 +131,7 @@ class UnwrapConfig:
 
     def validate(self) -> None:
         self.surface_kind = SurfaceKind(self.surface_kind)
+        self.publish_profile = PublishProfile(self.publish_profile)
         if self.sampling_step < 1 or not 2 <= self.max_frames <= 65_535:
             raise ValueError("sampling_step must be >= 1 and max_frames must be between 2 and 65535")
         if not 0 < self.min_object_area_ratio < 1:
@@ -171,3 +180,37 @@ class UnwrapConfig:
             raise ValueError("rectification_smoothing_window must be >= 3")
         if self.max_rectification_axis_step <= 0:
             raise ValueError("max_rectification_axis_step must be > 0")
+
+    def publish_profile_settings(self) -> dict[str, float]:
+        if self.publish_profile is PublishProfile.CONSERVATIVE:
+            return {
+                "soft_detail_floor": 0.08,
+                "soft_detail_ceiling": 0.16,
+                "soft_error_ceiling": 0.75,
+                "soft_anchor_protection": 0.05,
+                "anchor_conflict_multiplier": 0.8,
+                "owner_instability_multiplier": 0.8,
+                "severe_footprint_multiplier": 0.8,
+                "rectification_column_fraction_delta": 0.05,
+            }
+        if self.publish_profile is PublishProfile.COVERAGE_FIRST:
+            return {
+                "soft_detail_floor": 0.16,
+                "soft_detail_ceiling": 0.30,
+                "soft_error_ceiling": 1.25,
+                "soft_anchor_protection": 0.12,
+                "anchor_conflict_multiplier": 1.3,
+                "owner_instability_multiplier": 1.2,
+                "severe_footprint_multiplier": 1.25,
+                "rectification_column_fraction_delta": -0.05,
+            }
+        return {
+            "soft_detail_floor": 0.12,
+            "soft_detail_ceiling": 0.22,
+            "soft_error_ceiling": 0.9,
+            "soft_anchor_protection": 0.08,
+            "anchor_conflict_multiplier": 1.0,
+            "owner_instability_multiplier": 1.0,
+            "severe_footprint_multiplier": 1.0,
+            "rectification_column_fraction_delta": 0.0,
+        }

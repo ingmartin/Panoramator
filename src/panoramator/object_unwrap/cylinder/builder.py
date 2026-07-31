@@ -31,7 +31,12 @@ class CylinderUnwrapBuilder:
     ]:
         fit = fit_cylinder(frames)
         image_pose_graph = build_image_pose_graph(frames)
-        planar_mosaic = build_planar_mosaic(frames, image_pose_graph.edges, config.output_height)
+        planar_mosaic = build_planar_mosaic(
+            frames,
+            image_pose_graph.edges,
+            config.output_height,
+            config.publish_profile,
+        )
         fragments = [
             central_band(
                 *normalized_wall(item.frame.image, item.publish_mask, item.bbox, config.output_height),
@@ -136,9 +141,12 @@ class CylinderUnwrapBuilder:
                 max_mean_boundary_error=config.max_mosaic_boundary_mean_error,
                 max_severe_boundary_fraction=config.max_mosaic_boundary_severe_fraction,
                 severe_error_threshold=config.mosaic_boundary_severe_error,
-                max_severe_boundary_footprint=config.max_mosaic_boundary_severe_footprint,
-                max_anchor_conflict_footprint=config.max_mosaic_anchor_conflict_footprint,
-                max_owner_instability=config.max_mosaic_owner_instability,
+                max_severe_boundary_footprint=config.max_mosaic_boundary_severe_footprint
+                * config.publish_profile_settings()["severe_footprint_multiplier"],
+                max_anchor_conflict_footprint=config.max_mosaic_anchor_conflict_footprint
+                * config.publish_profile_settings()["anchor_conflict_multiplier"],
+                max_owner_instability=config.max_mosaic_owner_instability
+                * config.publish_profile_settings()["owner_instability_multiplier"],
             )
             artifacts.update(
                 {
@@ -148,7 +156,9 @@ class CylinderUnwrapBuilder:
                     "mosaic_error": mosaic_error,
                     "mosaic_boundary": gate.boundary_map,
                     "mosaic_saliency": gate.saliency_map,
+                    "mosaic_saliency_error": gate.saliency_error_map,
                     "mosaic_overlap_conflict": gate.overlap_conflict_map,
+                    "mosaic_owner_transition": gate.owner_transition_map,
                     "mosaic_owner_instability": gate.owner_instability_map,
                     "mosaic_seam_risk": gate.seam_risk_map,
                 }
@@ -156,7 +166,14 @@ class CylinderUnwrapBuilder:
             if gate.passed and trajectory.accepted_pairs:
                 strip = estimate_strip(
                     mosaic_coverage,
-                    min_column_fraction=config.min_rectification_column_fraction,
+                    min_column_fraction=float(
+                        np.clip(
+                            config.min_rectification_column_fraction
+                            + config.publish_profile_settings()["rectification_column_fraction_delta"],
+                            0.1,
+                            1.0,
+                        )
+                    ),
                     smoothing_window=config.rectification_smoothing_window,
                     max_axis_step=config.max_rectification_axis_step,
                 )
@@ -171,17 +188,22 @@ class CylinderUnwrapBuilder:
                         config.output_width,
                     )
                     local_error = reprojection_error.astype(np.float32)
-                    measurements = {**gate.measurements, **strip.measurements, "rectification_applied": 1}
+                    measurements = {
+                        **gate.measurements,
+                        **strip.measurements,
+                        "rectification_applied": 1,
+                        "publish_profile": config.publish_profile.value,
+                    }
                 else:
                     canvas, coverage, source_map = mosaic, mosaic_coverage, mosaic_source
                     local_error = mosaic_error.astype(np.float32)
-                    measurements = {**gate.measurements, "rectification_applied": 0}
+                    measurements = {**gate.measurements, "rectification_applied": 0, "publish_profile": config.publish_profile.value}
             else:
                 canvas, coverage, source_map = mosaic, mosaic_coverage, mosaic_source
                 local_error = mosaic_error.astype(np.float32)
-                measurements = {**gate.measurements, "rectification_applied": 0}
+                measurements = {**gate.measurements, "rectification_applied": 0, "publish_profile": config.publish_profile.value}
         else:
-            measurements = {"quality_gate_passed": 0, "rectification_applied": 0}
+            measurements = {"quality_gate_passed": 0, "rectification_applied": 0, "publish_profile": config.publish_profile.value}
         seam = least_covered_seam(coverage)
         # Preserve chronological orientation: x=0 corresponds to the first
         # observation.  Moving the seam is a presentation choice and must not

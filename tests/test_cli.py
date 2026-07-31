@@ -9,7 +9,7 @@ import panoramator.io.video as video_module
 from panoramator.cli import main as cli_main
 from panoramator.config.models import PanoramaConfig
 from panoramator.domain.models import PanoramaDiagnostics, PanoramaResult, VideoMetadata
-from panoramator.object_unwrap.models import SurfaceKind, UnwrapConfig, UnwrapDiagnostics, UnwrapResult, UnwrapStatus
+from panoramator.object_unwrap.models import PublishProfile, SurfaceKind, UnwrapConfig, UnwrapDiagnostics, UnwrapResult, UnwrapStatus
 
 
 def _build_args(**overrides) -> argparse.Namespace:
@@ -66,6 +66,7 @@ def _unwrap_args(**overrides) -> argparse.Namespace:
         "output_path": "out.png",
         "config": None,
         "surface_kind": "auto",
+        "publish_profile": None,
         "allow_partial": False,
         "sampling_step": None,
         "max_frames": None,
@@ -251,6 +252,7 @@ def test_unwrap_command_applies_overrides_and_prints_summary(monkeypatch, capsys
     args = _unwrap_args(
         config="unwrap.json",
         surface_kind="curved",
+        publish_profile="coverage_first",
         allow_partial=True,
         sampling_step=18,
         max_frames=24,
@@ -288,6 +290,7 @@ def test_unwrap_command_applies_overrides_and_prints_summary(monkeypatch, capsys
     assert result == 0
     config = captured["config"]
     assert config.surface_kind is SurfaceKind.CURVED
+    assert config.publish_profile is PublishProfile.COVERAGE_FIRST
     assert config.allow_partial is True
     assert config.sampling_step == 18
     assert config.max_frames == 24
@@ -383,7 +386,8 @@ def test_create_parser_routes_supported_subcommands() -> None:
     unwrap_args = parser.parse_args(
         [
             "unwrap", "video.mp4", "out.png", "--config", "unwrap.json", "--sampling-step", "18", "--max-frames", "24",
-            "--blur-threshold", "40", "--min-object-area-ratio", "0.1", "--crop-result", "--photo-mode", "--photo-crop-margin-px", "5",
+            "--publish-profile", "conservative_publish", "--blur-threshold", "40", "--min-object-area-ratio", "0.1",
+            "--crop-result", "--photo-mode", "--photo-crop-margin-px", "5",
             "--max-mosaic-boundary-mean-error", "52", "--no-save-debug-artifacts",
         ]
     )
@@ -399,6 +403,7 @@ def test_create_parser_routes_supported_subcommands() -> None:
     assert unwrap_args.config == "unwrap.json"
     assert unwrap_args.sampling_step == 18
     assert unwrap_args.max_frames == 24
+    assert unwrap_args.publish_profile == "conservative_publish"
     assert unwrap_args.blur_threshold == 40.0
     assert unwrap_args.min_object_area_ratio == 0.1
     assert unwrap_args.crop_result is True
