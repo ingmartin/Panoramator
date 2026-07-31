@@ -27,7 +27,7 @@ def build_image_pose_graph(frames: list[AnalyzedFrame], max_hop: int = 3) -> Ima
     detector = cv2.ORB_create(nfeatures=1800)  # type: ignore[attr-defined]
     features = []
     for item in frames:
-        geometry_mask = cv2.dilate(item.mask, np.ones((15, 15), np.uint8))
+        geometry_mask = cv2.dilate(item.geometry_mask, np.ones((15, 15), np.uint8))
         keypoints, descriptors = detector.detectAndCompute(cv2.cvtColor(item.frame.image, cv2.COLOR_BGR2GRAY), geometry_mask)
         features.append((keypoints, descriptors))
     edges: list[dict[str, float | int | str]] = []
@@ -66,8 +66,8 @@ def build_image_pose_graph(frames: list[AnalyzedFrame], max_hop: int = 3) -> Ima
             edge["inliers"] = int(accepted.sum())
             projected = cv2.transform(source[accepted, None, :], affine).reshape(-1, 2)
             edge["reprojection_error"] = float(np.mean(np.linalg.norm(projected - target[accepted], axis=1)))
-            strict_left = frames[left_index].mask
-            strict_right = frames[right_index].mask
+            strict_left = frames[left_index].publish_mask
+            strict_right = frames[right_index].publish_mask
             surface = []
             for match, keep in zip(good, accepted, strict=False):
                 if not keep:
@@ -78,7 +78,11 @@ def build_image_pose_graph(frames: list[AnalyzedFrame], max_hop: int = 3) -> Ima
                     surface.append(strict_left[y1, x1] > 0 and strict_right[y2, x2] > 0)
             surface_inliers = int(sum(surface))
             edge["surface_inliers"] = surface_inliers
-            edge["reason"] = "ok" if surface_inliers >= 8 else "background_only"
+            # Geometry is validated on the broader object mask; publish-mask
+            # support is a stricter diagnostic and alpha constraint. Requiring
+            # every transform to be strongly supported by the narrower band
+            # breaks otherwise stable chains on real cup footage.
+            edge["reason"] = "ok" if surface_inliers >= 2 else "background_only"
             if edge["reason"] == "ok":
                 edge.update({f"a{row}{column}": float(affine[row, column]) for row in range(2) for column in range(3)})
             edges.append(edge)

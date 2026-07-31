@@ -9,6 +9,7 @@ import panoramator.io.video as video_module
 from panoramator.cli import main as cli_main
 from panoramator.config.models import PanoramaConfig
 from panoramator.domain.models import PanoramaDiagnostics, PanoramaResult, VideoMetadata
+from panoramator.object_unwrap.models import SurfaceKind, UnwrapConfig, UnwrapDiagnostics, UnwrapResult, UnwrapStatus
 
 
 def _build_args(**overrides) -> argparse.Namespace:
@@ -52,6 +53,42 @@ def _build_args(**overrides) -> argparse.Namespace:
         "sampling_fallback": False,
         "no_sampling_fallback": False,
         "fallback_sampling_step": None,
+        "save_debug_artifacts": False,
+        "no_save_debug_artifacts": False,
+    }
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+def _unwrap_args(**overrides) -> argparse.Namespace:
+    values = {
+        "video_path": "input.mp4",
+        "output_path": "out.png",
+        "config": None,
+        "surface_kind": "auto",
+        "allow_partial": False,
+        "sampling_step": None,
+        "max_frames": None,
+        "blur_threshold": None,
+        "min_object_area_ratio": None,
+        "min_coverage": None,
+        "output_width": None,
+        "output_height": None,
+        "photo_mode": False,
+        "photo_crop_margin_px": None,
+        "save_debug_artifacts": False,
+        "no_save_debug_artifacts": False,
+        "central_band_ratio": None,
+        "max_pose_residual_radians": None,
+        "min_accepted_pose_pair_fraction": None,
+        "max_mosaic_boundary_mean_error": None,
+        "max_mosaic_boundary_severe_fraction": None,
+        "mosaic_boundary_severe_error": None,
+        "max_mosaic_boundary_severe_footprint": None,
+        "min_rectification_column_fraction": None,
+        "rectification_smoothing_window": None,
+        "max_rectification_axis_step": None,
+        "no_global_pose_optimization": False,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -125,6 +162,8 @@ def test_build_command_applies_overrides_and_prints_summary(monkeypatch, capsys)
         sampling_fallback=True,
         no_sampling_fallback=True,
         fallback_sampling_step=4,
+        save_debug_artifacts=True,
+        no_save_debug_artifacts=True,
     )
 
     result = cli_main.build_command(args)
@@ -161,6 +200,7 @@ def test_build_command_applies_overrides_and_prints_summary(monkeypatch, capsys)
     assert config.fallback_min_chain_length == 5
     assert config.enable_sampling_fallback is False
     assert config.fallback_sampling_step == 4
+    assert config.save_debug_artifacts is False
 
     output = capsys.readouterr().out
     assert "Panorama saved to: out.png" in output
@@ -174,6 +214,99 @@ def test_build_command_applies_overrides_and_prints_summary(monkeypatch, capsys)
 def test_build_command_validates_cli_overrides() -> None:
     with pytest.raises(ValueError, match="downscale must be between 0 and 1"):
         cli_main.build_command(_build_args(downscale=0.0))
+
+
+def test_unwrap_command_applies_overrides_and_prints_summary(monkeypatch, capsys) -> None:
+    loaded_config = UnwrapConfig(sampling_step=7, max_frames=33, blur_threshold=22.0)
+    captured: dict[str, UnwrapConfig] = {}
+
+    class _FakeUnwrapper:
+        def __init__(self, config: UnwrapConfig) -> None:
+            captured["config"] = config
+            self.config = config
+
+        def unwrap_video(self, video_path: str, output_path: str) -> UnwrapResult:
+            diagnostics = UnwrapDiagnostics(
+                UnwrapStatus.PARTIAL_SURFACE,
+                "partial",
+                "retry",
+                SurfaceKind.CYLINDRICAL,
+                selected_frames=[{"frame_index": 0}, {"frame_index": 1}],
+                sampling_step=self.config.sampling_step,
+                max_frames=self.config.max_frames,
+                allow_partial=self.config.allow_partial,
+            )
+            return UnwrapResult(image=None, coverage=None, model=None, diagnostics=diagnostics, output_path=Path(output_path))
+
+    monkeypatch.setattr(cli_main.UnwrapConfig, "from_json", classmethod(lambda cls, path: loaded_config))
+    monkeypatch.setattr(cli_main, "ObjectUnwrapper", _FakeUnwrapper)
+
+    args = _unwrap_args(
+        config="unwrap.json",
+        surface_kind="curved",
+        allow_partial=True,
+        sampling_step=18,
+        max_frames=24,
+        blur_threshold=40.0,
+        min_object_area_ratio=0.1,
+        min_coverage=0.85,
+        output_width=1200,
+        output_height=400,
+        photo_mode=True,
+        photo_crop_margin_px=5,
+        save_debug_artifacts=True,
+        no_save_debug_artifacts=True,
+        central_band_ratio=0.6,
+        max_pose_residual_radians=0.1,
+        min_accepted_pose_pair_fraction=0.7,
+        max_mosaic_boundary_mean_error=52.0,
+        max_mosaic_boundary_severe_fraction=0.8,
+        mosaic_boundary_severe_error=44.0,
+        max_mosaic_boundary_severe_footprint=0.05,
+        min_rectification_column_fraction=0.5,
+        rectification_smoothing_window=17,
+        max_rectification_axis_step=8.0,
+        no_global_pose_optimization=True,
+    )
+
+    result = cli_main.unwrap_command(args)
+
+    assert result == 0
+    config = captured["config"]
+    assert config.surface_kind is SurfaceKind.CURVED
+    assert config.allow_partial is True
+    assert config.sampling_step == 18
+    assert config.max_frames == 24
+    assert config.blur_threshold == 40.0
+    assert config.min_object_area_ratio == 0.1
+    assert config.min_coverage == 0.85
+    assert config.output_width == 1200
+    assert config.output_height == 400
+    assert config.photo_mode is True
+    assert config.photo_crop_margin_px == 5
+    assert config.save_debug_artifacts is False
+    assert config.central_band_ratio == 0.6
+    assert config.max_pose_residual_radians == 0.1
+    assert config.min_accepted_pose_pair_fraction == 0.7
+    assert config.max_mosaic_boundary_mean_error == 52.0
+    assert config.max_mosaic_boundary_severe_fraction == 0.8
+    assert config.mosaic_boundary_severe_error == 44.0
+    assert config.max_mosaic_boundary_severe_footprint == 0.05
+    assert config.min_rectification_column_fraction == 0.5
+    assert config.rectification_smoothing_window == 17
+    assert config.max_rectification_axis_step == 8.0
+    assert config.enable_global_pose_optimization is False
+
+    output = capsys.readouterr().out
+    assert "Status: partial_surface" in output
+    assert "Unwrap saved to: out.png" in output
+    assert "Selected frames: 2" in output
+    assert "Sampling step: 18" in output
+
+
+def test_unwrap_command_validates_cli_overrides() -> None:
+    with pytest.raises(ValueError, match="min_object_area_ratio must be between 0 and 1"):
+        cli_main.unwrap_command(_unwrap_args(min_object_area_ratio=0.0))
 
 
 def test_inspect_video_command_prints_metadata(monkeypatch, capsys) -> None:
@@ -221,11 +354,18 @@ def test_create_parser_routes_supported_subcommands() -> None:
     build_args = parser.parse_args(
         [
             "build", "video.mp4", "out.png", "--photo-mode", "--sampling-step", "7",
-            "--no-narrow-gap-fill", "--max-narrow-gap-width", "3", "--photo-crop-margin-px", "5",
+            "--no-narrow-gap-fill", "--max-narrow-gap-width", "3", "--photo-crop-margin-px", "5", "--no-save-debug-artifacts",
         ]
     )
     inspect_args = parser.parse_args(["inspect-video", "video.mp4"])
     export_args = parser.parse_args(["export-config"])
+    unwrap_args = parser.parse_args(
+        [
+            "unwrap", "video.mp4", "out.png", "--config", "unwrap.json", "--sampling-step", "18", "--max-frames", "24",
+            "--blur-threshold", "40", "--min-object-area-ratio", "0.1", "--photo-mode", "--photo-crop-margin-px", "5",
+            "--max-mosaic-boundary-mean-error", "52", "--no-save-debug-artifacts",
+        ]
+    )
 
     assert build_args.func is cli_main.build_command
     assert build_args.photo_mode is True
@@ -233,6 +373,17 @@ def test_create_parser_routes_supported_subcommands() -> None:
     assert build_args.no_narrow_gap_fill is True
     assert build_args.max_narrow_gap_width == 3
     assert build_args.photo_crop_margin_px == 5
+    assert build_args.no_save_debug_artifacts is True
+    assert unwrap_args.func is cli_main.unwrap_command
+    assert unwrap_args.config == "unwrap.json"
+    assert unwrap_args.sampling_step == 18
+    assert unwrap_args.max_frames == 24
+    assert unwrap_args.blur_threshold == 40.0
+    assert unwrap_args.min_object_area_ratio == 0.1
+    assert unwrap_args.photo_mode is True
+    assert unwrap_args.photo_crop_margin_px == 5
+    assert unwrap_args.no_save_debug_artifacts is True
+    assert unwrap_args.max_mosaic_boundary_mean_error == 52.0
     assert inspect_args.func is cli_main.inspect_video_command
     assert export_args.func is cli_main.export_config_command
 

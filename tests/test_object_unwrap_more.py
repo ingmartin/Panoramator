@@ -12,6 +12,8 @@ from panoramator.object_unwrap.curved.builder import CurvedSurfaceFallbackBuilde
 from panoramator.object_unwrap.curved.reconstruction import reconstruct_from_silhouettes
 from panoramator.object_unwrap.curved.template import CurvedSurfaceTemplate
 from panoramator.object_unwrap.curved.uv import unwrap_mesh
+from panoramator.object_unwrap.cylinder.builder import CylinderUnwrapBuilder
+from panoramator.object_unwrap.cylinder.pose import CylinderTrajectory
 from panoramator.object_unwrap.cylinder.mapper import (
     central_band,
     horizontal_shift,
@@ -27,6 +29,7 @@ from panoramator.object_unwrap.models import (
     UnwrapStatus,
 )
 from panoramator.object_unwrap.pose import optimize_rotation_angles
+from panoramator.object_unwrap.rectification import estimate_strip, evaluate_mosaic_quality, rectify_mosaic
 from panoramator.object_unwrap.segmentation import (
     masked_sharpness,
     object_mask,
@@ -38,7 +41,7 @@ from panoramator.object_unwrap.service import ObjectUnwrapper
 def _analyzed_frame(index: int = 0) -> AnalyzedFrame:
     image = np.full((32, 24, 3), 100, np.uint8)
     mask = np.full((32, 24), 255, np.uint8)
-    return AnalyzedFrame(Frame(index, float(index), image), mask, 100.0, (0, 0, 24, 32))
+    return AnalyzedFrame(Frame(index, float(index), image), mask, mask.copy(), 100.0, (0, 0, 24, 32))
 
 
 def test_segmentation_helpers_return_foreground_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -151,18 +154,61 @@ def test_unwrapper_writes_validated_result_with_synthetic_dependencies(monkeypat
             np.full((6, 7, 3), 120, np.uint8),
             np.full((6, 7), 255, np.uint8),
             SurfaceModel(SurfaceKind.CYLINDRICAL),
-            {"surface_coverage_fraction": 1.0, "pose_residual_radians": 0.01, "accepted_pose_pairs": 2},
+            {"surface_coverage_fraction": 1.0, "pose_residual_radians": 0.01, "accepted_pose_pairs": 2, "quality_gate_passed": 1, "rectification_applied": 1},
             {},
         ),
     )
 
     output = tmp_path / "surface.png"
-    result = ObjectUnwrapper(UnwrapConfig(min_accepted_pose_pair_fraction=1.0)).unwrap_video("input.mp4", output)
+    result = ObjectUnwrapper(UnwrapConfig(min_accepted_pose_pair_fraction=1.0, allow_partial=True)).unwrap_video("input.mp4", output)
 
-    assert result.diagnostics.status is UnwrapStatus.OK
+    assert result.diagnostics.status is UnwrapStatus.PARTIAL_SURFACE
     assert result.output_path == output
     assert cv2.imread(str(output), cv2.IMREAD_UNCHANGED).shape == (6, 7, 4)
-    assert (tmp_path / "surface_diagnostics.json").exists()
+    assert (tmp_path / "surface_debug" / "run.json").exists()
+
+
+def test_unwrapper_photo_mode_crops_to_visible_area(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from panoramator.object_unwrap import service
+
+    class FakeSource:
+        def __init__(self, *args) -> None:
+            pass
+
+        def open(self) -> None:
+            return None
+
+        def iter_frames(self):
+            return [Frame(0, 0.0, np.zeros((8, 8, 3), np.uint8)), Frame(1, 1.0, np.zeros((8, 8, 3), np.uint8))]
+
+        def close(self) -> None:
+            return None
+
+    analyzed = [_analyzed_frame(0), _analyzed_frame(1)]
+    monkeypatch.setattr(service, "OpenCVVideoSource", FakeSource)
+    monkeypatch.setattr(service.VideoAnalyzer, "analyze", lambda self, frames, config: Analysis(analyzed, SurfaceKind.CYLINDRICAL))
+    coverage = np.zeros((6, 10), np.uint8)
+    coverage[1:5, 2:8] = 255
+    monkeypatch.setattr(
+        service.CylinderUnwrapBuilder,
+        "build",
+        lambda self, frames, config: (
+            np.full((6, 10, 3), 120, np.uint8),
+            coverage.copy(),
+            SurfaceModel(SurfaceKind.CYLINDRICAL),
+            {"surface_coverage_fraction": 1.0, "pose_residual_radians": 0.01, "accepted_pose_pairs": 2, "quality_gate_passed": 1, "rectification_applied": 1},
+            {},
+        ),
+    )
+
+    output = tmp_path / "surface.png"
+    result = ObjectUnwrapper(
+        UnwrapConfig(min_accepted_pose_pair_fraction=1.0, allow_partial=True, photo_mode=True, photo_crop_margin_px=0)
+    ).unwrap_video("input.mp4", output)
+
+    saved = cv2.imread(str(output), cv2.IMREAD_UNCHANGED)
+    assert result.diagnostics.status is UnwrapStatus.PARTIAL_SURFACE
+    assert saved.shape[:2] == (4, 6)
 
 
 def test_unwrapper_returns_failure_diagnostics_without_writing_an_image(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -179,7 +225,23 @@ def test_unwrapper_returns_failure_diagnostics_without_writing_an_image(monkeypa
     assert result.image is None
     assert result.diagnostics.status is UnwrapStatus.OBJECT_NOT_DETECTED
     assert not output.exists()
-    assert (tmp_path / "surface_diagnostics.json").exists()
+    assert (tmp_path / "surface_debug" / "run.json").exists()
+
+
+def test_unwrapper_can_disable_debug_artifacts(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from panoramator.object_unwrap import service
+
+    monkeypatch.setattr(service.VideoAnalyzer, "analyze", lambda self, frames, config: Analysis([], SurfaceKind.AUTO, UnwrapStatus.OBJECT_NOT_DETECTED, "missing", "retry"))
+    monkeypatch.setattr(service.OpenCVVideoSource, "open", lambda self: None)
+    monkeypatch.setattr(service.OpenCVVideoSource, "iter_frames", lambda self: [])
+    monkeypatch.setattr(service.OpenCVVideoSource, "close", lambda self: None)
+
+    output = tmp_path / "surface.png"
+    result = ObjectUnwrapper(UnwrapConfig(save_debug_artifacts=False)).unwrap_video("input.mp4", output)
+
+    assert result.diagnostics.status is UnwrapStatus.OBJECT_NOT_DETECTED
+    assert result.diagnostics.output_files == []
+    assert not (tmp_path / "surface_debug").exists()
 
 
 def test_artifact_writer_raises_when_coverage_cannot_be_saved(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -188,7 +250,7 @@ def test_artifact_writer_raises_when_coverage_cannot_be_saved(monkeypatch: pytes
     monkeypatch.setattr(cv2, "imwrite", lambda path, image: False)
     diagnostics = UnwrapDiagnostics(UnwrapStatus.OK, "ok", "", SurfaceKind.CYLINDRICAL)
     with pytest.raises(RuntimeError, match="coverage"):
-        write_artifacts(tmp_path / "surface.png", diagnostics, np.ones((2, 2), np.uint8))
+        write_artifacts(tmp_path / "surface.png", UnwrapConfig(), diagnostics, np.ones((2, 2), np.uint8))
 
 
 def test_unwrap_cli_fails_when_partial_result_has_no_output(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
@@ -213,3 +275,108 @@ def test_unwrap_cli_fails_when_partial_result_has_no_output(monkeypatch: pytest.
 
     assert exit_code == 2
     assert "Status: partial_surface" in capsys.readouterr().out
+
+
+def test_quality_gate_rejects_high_error_owner_boundaries() -> None:
+    coverage = np.full((6, 8), 255, np.uint8)
+    source = np.zeros((6, 8), np.uint16)
+    source[:, :4] = 1
+    source[:, 4:] = 2
+    error = np.zeros((6, 8), np.uint8)
+    error[:, 3:5] = 80
+
+    gate = evaluate_mosaic_quality(coverage, source, error, 20.0, 0.72, 40.0, 0.04)
+
+    assert gate.passed is False
+    assert gate.mean_boundary_error >= 40.0
+
+
+def test_strip_estimate_and_rectification_straighten_observed_band() -> None:
+    height, width = 60, 48
+    image = np.zeros((height, width, 3), np.uint8)
+    coverage = np.zeros((height, width), np.uint8)
+    source = np.ones((height, width), np.uint16)
+    error = np.zeros((height, width), np.uint8)
+    for x in range(width):
+        top = 10 + x // 6
+        bottom = 42 + x // 6
+        coverage[top:bottom + 1, x] = 255
+        image[top:bottom + 1, x] = (30 + x, 150, 220)
+    strip = estimate_strip(coverage, min_column_fraction=0.8, smoothing_window=7, max_axis_step=4.0)
+
+    assert strip is not None
+    rectified, rectified_coverage, rectified_source, rectified_error = rectify_mosaic(
+        image, coverage, source, error, strip, output_height=40
+    )
+
+    top_rows = [int(np.flatnonzero(rectified_coverage[:, x])[0]) for x in range(width)]
+    bottom_rows = [int(np.flatnonzero(rectified_coverage[:, x])[-1]) for x in range(width)]
+    assert max(top_rows) - min(top_rows) <= 1
+    assert max(bottom_rows) - min(bottom_rows) <= 1
+    assert rectified.shape[0] == 40
+    assert rectified.shape[1] > width
+    assert rectified_source.shape == rectified.shape[:2]
+    assert rectified_error.shape == rectified.shape[:2]
+
+
+def test_cylinder_builder_prefers_baseline_planar_mosaic_over_angular_mosaic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from panoramator.object_unwrap.cylinder import builder as builder_module
+
+    baseline = np.full((20, 30, 3), 80, np.uint8)
+    baseline[:, 5:25] = (10, 160, 220)
+    baseline_coverage = np.full((20, 30), 255, np.uint8)
+    baseline_source = np.ones((20, 30), np.uint16)
+    baseline_error = np.zeros((20, 30), np.uint8)
+
+    ghosted = np.full((20, 30, 3), 180, np.uint8)
+    ghosted[:, 2:28] = (220, 30, 30)
+
+    monkeypatch.setattr(
+        builder_module,
+        "build_planar_mosaic",
+        lambda frames, edges, output_height: (baseline.copy(), baseline_coverage.copy(), baseline_source.copy(), baseline_error.copy()),
+    )
+    monkeypatch.setattr(
+        builder_module.CylinderUnwrapBuilder,
+        "_feature_mosaic",
+        staticmethod(
+            lambda fragments, angles, min_angle, angle_span, atlas_width: (
+                ghosted.copy(),
+                baseline_coverage.copy(),
+                baseline_source.copy(),
+                baseline_error.copy(),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        builder_module,
+        "solve_monotonic_trajectory",
+        lambda observations: CylinderTrajectory(
+            angles=[0.0, 0.2, 0.4],
+            steps=[0.2, 0.2],
+            accepted_pairs=2,
+            residual_radians=0.01,
+            sweep_radians=0.4,
+            repeated_observation=False,
+            accepted=[True, True],
+            rejection_reasons=["", ""],
+        ),
+    )
+    monkeypatch.setattr(
+        builder_module,
+        "estimate_strip",
+        lambda coverage, min_column_fraction, smoothing_window, max_axis_step: None,
+    )
+
+    image, coverage, _model, measurements, artifacts = CylinderUnwrapBuilder().build(
+        [_analyzed_frame(0), _analyzed_frame(1), _analyzed_frame(2)],
+        UnwrapConfig(surface_kind=SurfaceKind.CYLINDRICAL, output_height=20, output_width=30),
+    )
+
+    assert np.array_equal(image, baseline)
+    assert np.array_equal(coverage, baseline_coverage)
+    assert np.array_equal(artifacts["mosaic"], baseline)
+    assert np.array_equal(artifacts["angular_mosaic"], ghosted)
+    assert measurements["rectification_applied"] == 0

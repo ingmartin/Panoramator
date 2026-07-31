@@ -7,13 +7,14 @@ import numpy as np
 from panoramator.domain.models import Frame
 
 from .models import SurfaceKind, UnwrapConfig, UnwrapStatus
-from .segmentation import masked_sharpness, object_mask, stable_surface_bbox
+from .segmentation import masked_sharpness, object_mask, publish_surface_mask, stable_surface_bbox
 
 
 @dataclass(slots=True)
 class AnalyzedFrame:
     frame: Frame
-    mask: np.ndarray
+    geometry_mask: np.ndarray
+    publish_mask: np.ndarray
     sharpness: float
     bbox: tuple[int, int, int, int]
 
@@ -31,14 +32,23 @@ class VideoAnalyzer:
     def analyze(self, frames: list[Frame], config: UnwrapConfig) -> Analysis:
         candidates: list[AnalyzedFrame] = []
         for frame in frames:
-            mask = object_mask(frame.image, config.min_object_area_ratio)
-            if mask is None:
+            geometry_mask = object_mask(frame.image, config.min_object_area_ratio)
+            if geometry_mask is None:
                 continue
-            bbox = stable_surface_bbox(mask)
+            bbox = stable_surface_bbox(geometry_mask)
             if bbox is None:
                 continue
+            publish_mask = publish_surface_mask(geometry_mask, bbox)
             x, y, width, height = bbox
-            candidates.append(AnalyzedFrame(frame, mask, masked_sharpness(frame.image, mask), (x, y, width, height)))
+            candidates.append(
+                AnalyzedFrame(
+                    frame,
+                    geometry_mask,
+                    publish_mask,
+                    masked_sharpness(frame.image, publish_mask),
+                    (x, y, width, height),
+                )
+            )
         if len(candidates) < 2:
             return Analysis([], config.surface_kind, UnwrapStatus.OBJECT_NOT_DETECTED,
                             "The foreground surface cannot be separated reliably.",

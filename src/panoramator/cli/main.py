@@ -116,6 +116,10 @@ def build_command(args: argparse.Namespace) -> int:
         config.enable_sampling_fallback = False
     if args.fallback_sampling_step is not None:
         config.fallback_sampling_step = args.fallback_sampling_step
+    if getattr(args, "save_debug_artifacts", False):
+        config.save_debug_artifacts = True
+    if getattr(args, "no_save_debug_artifacts", False):
+        config.save_debug_artifacts = False
 
     config.validate()
 
@@ -151,22 +155,67 @@ def inspect_video_command(args: argparse.Namespace) -> int:
 
 
 def unwrap_command(args: argparse.Namespace) -> int:
-    config = UnwrapConfig(
-        surface_kind=SurfaceKind(args.surface_kind),
-        allow_partial=args.allow_partial,
-        sampling_step=args.sampling_step,
-        max_frames=args.max_frames,
-        min_coverage=args.min_coverage,
-        output_width=args.output_width,
-        output_height=args.output_height,
-        enable_global_pose_optimization=not args.no_global_pose_optimization,
-    )
+    config = UnwrapConfig()
+    if getattr(args, "config", None):
+        config = UnwrapConfig.from_json(args.config)
+
+    if getattr(args, "surface_kind", None) is not None:
+        config.surface_kind = SurfaceKind(args.surface_kind)
+    if getattr(args, "allow_partial", False):
+        config.allow_partial = True
+    if getattr(args, "sampling_step", None) is not None:
+        config.sampling_step = args.sampling_step
+    if getattr(args, "max_frames", None) is not None:
+        config.max_frames = args.max_frames
+    if getattr(args, "blur_threshold", None) is not None:
+        config.blur_threshold = args.blur_threshold
+    if getattr(args, "min_object_area_ratio", None) is not None:
+        config.min_object_area_ratio = args.min_object_area_ratio
+    if getattr(args, "min_coverage", None) is not None:
+        config.min_coverage = args.min_coverage
+    if getattr(args, "output_width", None) is not None:
+        config.output_width = args.output_width
+    if getattr(args, "output_height", None) is not None:
+        config.output_height = args.output_height
+    if getattr(args, "photo_mode", False):
+        config.photo_mode = True
+    if getattr(args, "photo_crop_margin_px", None) is not None:
+        config.photo_crop_margin_px = args.photo_crop_margin_px
+    if getattr(args, "save_debug_artifacts", False):
+        config.save_debug_artifacts = True
+    if getattr(args, "no_save_debug_artifacts", False):
+        config.save_debug_artifacts = False
+    if getattr(args, "central_band_ratio", None) is not None:
+        config.central_band_ratio = args.central_band_ratio
+    if getattr(args, "max_pose_residual_radians", None) is not None:
+        config.max_pose_residual_radians = args.max_pose_residual_radians
+    if getattr(args, "min_accepted_pose_pair_fraction", None) is not None:
+        config.min_accepted_pose_pair_fraction = args.min_accepted_pose_pair_fraction
+    if getattr(args, "max_mosaic_boundary_mean_error", None) is not None:
+        config.max_mosaic_boundary_mean_error = args.max_mosaic_boundary_mean_error
+    if getattr(args, "max_mosaic_boundary_severe_fraction", None) is not None:
+        config.max_mosaic_boundary_severe_fraction = args.max_mosaic_boundary_severe_fraction
+    if getattr(args, "mosaic_boundary_severe_error", None) is not None:
+        config.mosaic_boundary_severe_error = args.mosaic_boundary_severe_error
+    if getattr(args, "max_mosaic_boundary_severe_footprint", None) is not None:
+        config.max_mosaic_boundary_severe_footprint = args.max_mosaic_boundary_severe_footprint
+    if getattr(args, "min_rectification_column_fraction", None) is not None:
+        config.min_rectification_column_fraction = args.min_rectification_column_fraction
+    if getattr(args, "rectification_smoothing_window", None) is not None:
+        config.rectification_smoothing_window = args.rectification_smoothing_window
+    if getattr(args, "max_rectification_axis_step", None) is not None:
+        config.max_rectification_axis_step = args.max_rectification_axis_step
+    if getattr(args, "no_global_pose_optimization", False):
+        config.enable_global_pose_optimization = False
+    config.validate()
     result = ObjectUnwrapper(config).unwrap_video(args.video_path, args.output_path)
     print(f"Status: {result.diagnostics.status.value}")
     print(f"Surface: {result.diagnostics.surface_kind.value}")
-    print(result.diagnostics.message)
     if result.output_path is not None:
         print(f"Unwrap saved to: {result.output_path}")
+    print(f"Selected frames: {len(result.diagnostics.selected_frames)}")
+    print(f"Sampling step: {config.sampling_step}")
+    print(result.diagnostics.message)
     if result.diagnostics.recommendation:
         print(f"Recommendation: {result.diagnostics.recommendation}")
     return 0 if result.output_path is not None and result.diagnostics.status in {UnwrapStatus.OK, UnwrapStatus.PARTIAL_SURFACE} else 2
@@ -235,18 +284,37 @@ def create_parser() -> argparse.ArgumentParser:
     build.add_argument("--sampling-fallback", action="store_true")
     build.add_argument("--no-sampling-fallback", action="store_true")
     build.add_argument("--fallback-sampling-step", type=int)
+    build.add_argument("--save-debug-artifacts", action="store_true")
+    build.add_argument("--no-save-debug-artifacts", action="store_true")
     build.set_defaults(func=build_command)
 
     unwrap = subparsers.add_parser("unwrap", help="Build a surface map from video")
     unwrap.add_argument("video_path")
     unwrap.add_argument("output_path")
+    unwrap.add_argument("--config")
     unwrap.add_argument("--surface", dest="surface_kind", choices=[kind.value for kind in SurfaceKind], default="auto")
     unwrap.add_argument("--allow-partial", action="store_true")
-    unwrap.add_argument("--sampling-step", type=int, default=12)
-    unwrap.add_argument("--max-frames", type=int, default=48)
-    unwrap.add_argument("--min-coverage", type=float, default=0.90)
-    unwrap.add_argument("--output-width", type=int, default=1536)
-    unwrap.add_argument("--output-height", type=int, default=512)
+    unwrap.add_argument("--sampling-step", type=int)
+    unwrap.add_argument("--max-frames", type=int)
+    unwrap.add_argument("--blur-threshold", type=float)
+    unwrap.add_argument("--min-object-area-ratio", type=float)
+    unwrap.add_argument("--min-coverage", type=float)
+    unwrap.add_argument("--output-width", type=int)
+    unwrap.add_argument("--output-height", type=int)
+    unwrap.add_argument("--save-debug-artifacts", action="store_true")
+    unwrap.add_argument("--no-save-debug-artifacts", action="store_true")
+    unwrap.add_argument("--photo-mode", action="store_true")
+    unwrap.add_argument("--photo-crop-margin-px", type=int)
+    unwrap.add_argument("--central-band-ratio", type=float)
+    unwrap.add_argument("--max-pose-residual-radians", type=float)
+    unwrap.add_argument("--min-accepted-pose-pair-fraction", type=float)
+    unwrap.add_argument("--max-mosaic-boundary-mean-error", type=float)
+    unwrap.add_argument("--max-mosaic-boundary-severe-fraction", type=float)
+    unwrap.add_argument("--mosaic-boundary-severe-error", type=float)
+    unwrap.add_argument("--max-mosaic-boundary-severe-footprint", type=float)
+    unwrap.add_argument("--min-rectification-column-fraction", type=float)
+    unwrap.add_argument("--rectification-smoothing-window", type=int)
+    unwrap.add_argument("--max-rectification-axis-step", type=float)
     unwrap.add_argument(
         "--no-global-pose-optimization",
         action="store_true",

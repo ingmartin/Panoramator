@@ -71,3 +71,55 @@ def stable_surface_bbox(mask: np.ndarray) -> tuple[int, int, int, int] | None:
     if not x_positions.size:
         return None
     return int(x_positions[0]), int(top), int(x_positions[-1] - x_positions[0] + 1), int(bottom - top)
+
+
+def publish_surface_mask(mask: np.ndarray, bbox: tuple[int, int, int, int]) -> np.ndarray:
+    """Keep only the main observed side band inside the stable bbox.
+
+    The matching geometry may legitimately include extra support above the
+    object band, but publication must stay conservative: for each column we
+    keep only the vertical foreground run intersecting the stable band centre.
+    This removes fingers or other occluders sticking up above the rim while
+    preserving the contiguous visible surface below.
+    """
+    x, y, width, height = bbox
+    result = np.zeros_like(mask)
+    axis_row = y + max(height // 2, 0)
+    tops = np.full(width, np.nan, dtype=np.float32)
+    bottoms = np.full(width, np.nan, dtype=np.float32)
+    for column in range(x, x + width):
+        ys = np.flatnonzero(mask[:, column] > 0)
+        if ys.size == 0:
+            continue
+        splits = np.flatnonzero(np.diff(ys) > 1) + 1
+        runs = np.split(ys, splits)
+        chosen = None
+        for run in runs:
+            if run[0] <= axis_row <= run[-1]:
+                chosen = run
+                break
+        if chosen is None:
+            chosen = min(runs, key=lambda run: min(abs(int(run[0]) - axis_row), abs(int(run[-1]) - axis_row)))
+        local = column - x
+        tops[local] = float(chosen[0])
+        bottoms[local] = float(chosen[-1])
+    valid = np.isfinite(tops) & np.isfinite(bottoms)
+    if not np.any(valid):
+        return result
+    indices = np.arange(width, dtype=np.float32)
+    tops[~valid] = np.interp(indices[~valid], indices[valid], tops[valid])
+    bottoms[~valid] = np.interp(indices[~valid], indices[valid], bottoms[valid])
+    kernel = max(9, (width // 12) | 1)
+    smooth_top = cv2.GaussianBlur(tops[None, :], (kernel, 1), 0).reshape(-1)
+    smooth_bottom = cv2.GaussianBlur(bottoms[None, :], (kernel, 1), 0).reshape(-1)
+    margin = max(2, height // 30)
+    for column in range(x, x + width):
+        local = column - x
+        top = int(round(max(y, smooth_top[local] - margin)))
+        bottom = int(round(min(y + height - 1, smooth_bottom[local] + margin)))
+        if bottom < top:
+            continue
+        present = mask[top : bottom + 1, column] > 0
+        result[top : bottom + 1, column][present] = 255
+    result = cv2.morphologyEx(result, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    return result

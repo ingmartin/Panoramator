@@ -26,13 +26,13 @@ def _frame(index: int, shift: int) -> AnalyzedFrame:
     cv2.line(image, (25 + shift % 20, 10), (25 + shift % 20, 89), (255, 255, 255), 2)
     mask = np.zeros((100, 80), np.uint8)
     mask[10:90, 15:65] = 255
-    return AnalyzedFrame(Frame(index, float(index), image), mask, 100.0, (15, 10, 50, 80))
+    return AnalyzedFrame(Frame(index, float(index), image), mask, mask.copy(), 100.0, (15, 10, 50, 80))
 
 
 def test_cylinder_builder_creates_alpha_coverage_and_low_coverage_seam() -> None:
     image, coverage, model, measurements, artifacts = CylinderUnwrapBuilder().build(
         [_frame(0, 0), _frame(1, 8), _frame(2, 16)],
-        UnwrapConfig(surface_kind=SurfaceKind.CYLINDRICAL, output_width=200, output_height=80),
+        UnwrapConfig(surface_kind=SurfaceKind.CYLINDRICAL, output_width=200, output_height=80, rectification_smoothing_window=7),
     )
 
     assert image.shape[0] == 80
@@ -44,14 +44,15 @@ def test_cylinder_builder_creates_alpha_coverage_and_low_coverage_seam() -> None
     assert artifacts["source"].shape == coverage.shape
     assert artifacts["reprojection_error"].shape == coverage.shape
     assert measurements["rendering"] == "feature_mosaic_then_global_rectification"
+    assert artifacts["angular_mosaic"].shape[0] == 80
 
 
 def test_artifacts_keep_png_in_diagnostic_file_list(tmp_path) -> None:
     output = tmp_path / "unwrap.png"
     diagnostics = UnwrapDiagnostics(UnwrapStatus.OK, "ok", "", SurfaceKind.CYLINDRICAL, output_files=[str(output)])
-    files = write_artifacts(output, diagnostics, np.full((4, 4), 255, np.uint8))
+    files = write_artifacts(output, UnwrapConfig(), diagnostics, np.full((4, 4), 255, np.uint8))
 
-    report = json.loads((tmp_path / "unwrap_diagnostics.json").read_text())
+    report = json.loads((tmp_path / "unwrap_debug" / "run.json").read_text())
     assert str(output) in files
     assert report["output_files"] == files
 
@@ -61,13 +62,14 @@ def test_artifacts_include_source_and_reprojection_error_maps(tmp_path) -> None:
     diagnostics = UnwrapDiagnostics(UnwrapStatus.OK, "ok", "", SurfaceKind.CYLINDRICAL)
     files = write_artifacts(
         output,
+        UnwrapConfig(),
         diagnostics,
         np.full((4, 4), 255, np.uint8),
         {"source": np.ones((4, 4), np.uint8), "reprojection_error": np.zeros((4, 4), np.uint8)},
     )
 
-    assert str(tmp_path / "unwrap_source.png") in files
-    assert str(tmp_path / "unwrap_reprojection_error.png") in files
+    assert str(tmp_path / "unwrap_debug" / "source.png") in files
+    assert str(tmp_path / "unwrap_debug" / "reprojection_error.png") in files
 
 
 def test_monotonic_trajectory_rejects_reversed_outlier_without_reordering_frames() -> None:
@@ -94,8 +96,8 @@ def test_image_pose_graph_marks_surface_supported_translation() -> None:
     shifted = np.roll(base, 6, axis=1)
     mask = np.full((100, 120), 255, np.uint8)
     frames = [
-        AnalyzedFrame(Frame(0, 0.0, base), mask, 100.0, (0, 0, 120, 100)),
-        AnalyzedFrame(Frame(1, 1.0, shifted), mask, 100.0, (0, 0, 120, 100)),
+        AnalyzedFrame(Frame(0, 0.0, base), mask, mask.copy(), 100.0, (0, 0, 120, 100)),
+        AnalyzedFrame(Frame(1, 1.0, shifted), mask, mask.copy(), 100.0, (0, 0, 120, 100)),
     ]
     graph = build_image_pose_graph(frames)
 

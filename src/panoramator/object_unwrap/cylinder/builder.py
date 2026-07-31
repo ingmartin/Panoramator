@@ -10,6 +10,7 @@ from ..coverage import coverage_fraction, least_covered_seam
 from ..image_pose_graph import build_image_pose_graph
 from ..models import SurfaceModel, UnwrapConfig
 from ..planar_mosaic import build_planar_mosaic
+from ..rectification import estimate_strip, evaluate_mosaic_quality, rectify_mosaic
 from .fitting import fit_cylinder
 from .mapper import (
     angular_increment,
@@ -32,7 +33,10 @@ class CylinderUnwrapBuilder:
         image_pose_graph = build_image_pose_graph(frames)
         planar_mosaic = build_planar_mosaic(frames, image_pose_graph.edges, config.output_height)
         fragments = [
-            central_band(*normalized_wall(item.frame.image, item.mask, item.bbox, config.output_height), config.central_band_ratio)
+            central_band(
+                *normalized_wall(item.frame.image, item.publish_mask, item.bbox, config.output_height),
+                config.central_band_ratio,
+            )
             for item in frames
         ]
         half_view_angle = float(np.arcsin(config.central_band_ratio))
@@ -75,6 +79,7 @@ class CylinderUnwrapBuilder:
         atlas_width, pixels_per_radian = self._atlas_width(fit.boxes, angle_span, config)
         canvas = np.zeros((config.output_height, atlas_width, 3), np.uint8)
         weights = np.zeros((config.output_height, atlas_width), np.float32)
+        artifacts: dict[str, object] = {}
         # A pixel-owner map makes the selected source explicit.  Zero means an
         # unobserved pixel; frame numbers are stored one-based so it is suitable
         # for a lossless grayscale PNG.
@@ -98,7 +103,7 @@ class CylinderUnwrapBuilder:
             source_y = np.linspace(y, y + height - 1, config.output_height, dtype=np.float32)
             source_map_y = np.repeat(source_y[:, None], atlas_width, axis=1)
             mapped_image = cv2.remap(item.frame.image, map_x, source_map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
-            mapped_mask = cv2.remap(item.mask, map_x, source_map_y, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT)
+            mapped_mask = cv2.remap(item.publish_mask, map_x, source_map_y, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT)
             column_weights = np.cos(local_angles).astype(np.float32)
             column_weights[~visible] = 0.0
             for target_x in np.flatnonzero(visible):
@@ -118,15 +123,57 @@ class CylinderUnwrapBuilder:
                 weights[replace, target_x] = column_weights[target_x]
                 source_map[replace, target_x] = frame_offset
         coverage = np.where(weights > 0, 255, 0).astype(np.uint8)
-        if trajectory is not None and trajectory.accepted_pairs:
-            # The per-frame cylindrical remap above is retained only as a
-            # diagnostic fallback.  A pose-validated result is composed first
-            # as one mask-aware feature mosaic; it is not a row of unrelated
-            # source strips warped independently into the final atlas.
-            canvas, coverage, source_map, reprojection_error = self._feature_mosaic(
-                fragments, angles, min_angle, angle_span, atlas_width
+        if trajectory is not None and planar_mosaic is not None:
+            # Publish only the baseline image-space mosaic built from the same
+            # graph transforms. The angular strip composer remains diagnostic
+            # only; it is exactly the path that produced visible ghosting.
+            mosaic, mosaic_coverage, mosaic_source, mosaic_error = planar_mosaic
+            gate = evaluate_mosaic_quality(
+                mosaic_coverage,
+                mosaic_source,
+                mosaic_error,
+                max_mean_boundary_error=config.max_mosaic_boundary_mean_error,
+                max_severe_boundary_fraction=config.max_mosaic_boundary_severe_fraction,
+                severe_error_threshold=config.mosaic_boundary_severe_error,
+                max_severe_boundary_footprint=config.max_mosaic_boundary_severe_footprint,
             )
-            local_error = reprojection_error.astype(np.float32)
+            artifacts.update(
+                {
+                    "mosaic": mosaic,
+                    "mosaic_coverage": mosaic_coverage,
+                    "mosaic_source": mosaic_source,
+                    "mosaic_error": mosaic_error,
+                }
+            )
+            if gate.passed and trajectory.accepted_pairs:
+                strip = estimate_strip(
+                    mosaic_coverage,
+                    min_column_fraction=config.min_rectification_column_fraction,
+                    smoothing_window=config.rectification_smoothing_window,
+                    max_axis_step=config.max_rectification_axis_step,
+                )
+                if strip is not None:
+                    canvas, coverage, source_map, reprojection_error = rectify_mosaic(
+                        mosaic,
+                        mosaic_coverage,
+                        mosaic_source,
+                        mosaic_error,
+                        strip,
+                        config.output_height,
+                        config.output_width,
+                    )
+                    local_error = reprojection_error.astype(np.float32)
+                    measurements = {**gate.measurements, **strip.measurements, "rectification_applied": 1}
+                else:
+                    canvas, coverage, source_map = mosaic, mosaic_coverage, mosaic_source
+                    local_error = mosaic_error.astype(np.float32)
+                    measurements = {**gate.measurements, "rectification_applied": 0}
+            else:
+                canvas, coverage, source_map = mosaic, mosaic_coverage, mosaic_source
+                local_error = mosaic_error.astype(np.float32)
+                measurements = {**gate.measurements, "rectification_applied": 0}
+        else:
+            measurements = {"quality_gate_passed": 0, "rectification_applied": 0}
         seam = least_covered_seam(coverage)
         # Preserve chronological orientation: x=0 corresponds to the first
         # observation.  Moving the seam is a presentation choice and must not
@@ -143,15 +190,38 @@ class CylinderUnwrapBuilder:
             }
             for index, (delta, confidence) in enumerate(observations)
         ]
-        artifacts: dict[str, object] = {
+        artifacts.update({
             "source": source_map,
             "reprojection_error": np.clip(local_error, 0, 255).astype(np.uint8),
             "pose_pairs": pose_pairs,
             "image_pose_graph": image_pose_graph.edges,
-        }
+        })
         if planar_mosaic is not None:
             mosaic, mosaic_coverage, mosaic_source, mosaic_error = planar_mosaic
-            artifacts.update({"mosaic": mosaic, "mosaic_coverage": mosaic_coverage, "mosaic_source": mosaic_source, "mosaic_error": mosaic_error})
+            artifacts.update(
+                {
+                    "mosaic": mosaic,
+                    "mosaic_coverage": mosaic_coverage,
+                    "mosaic_source": mosaic_source,
+                    "mosaic_error": mosaic_error,
+                    "image_space_mosaic": mosaic,
+                    "image_space_mosaic_coverage": mosaic_coverage,
+                    "image_space_mosaic_source": mosaic_source,
+                    "image_space_mosaic_error": mosaic_error,
+                }
+            )
+        if trajectory is not None:
+            feature_mosaic, feature_coverage, feature_source, feature_error = self._feature_mosaic(
+                fragments, angles, min_angle, angle_span, atlas_width
+            )
+            artifacts.update(
+                {
+                    "angular_mosaic": feature_mosaic,
+                    "angular_mosaic_coverage": feature_coverage,
+                    "angular_mosaic_source": feature_source,
+                    "angular_mosaic_error": feature_error,
+                }
+            )
         return canvas, coverage, fit.model, {
             "coverage_fraction": coverage_fraction(coverage),
             "surface_coverage_fraction": min(1.0, angle_span / (2.0 * np.pi)),
@@ -174,6 +244,7 @@ class CylinderUnwrapBuilder:
             "image_pose_graph_edges": len(image_pose_graph.edges),
             "image_pose_graph_valid_edges": image_pose_graph.valid_edges,
             "planar_mosaic_available": int(planar_mosaic is not None),
+            **measurements,
         }, artifacts
 
     @staticmethod

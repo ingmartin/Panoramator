@@ -40,10 +40,7 @@ def build_planar_mosaic(
     error: np.ndarray = np.zeros((height, width), np.float32)
     for index, (item, transform) in enumerate(zip(frames, transforms, strict=True), start=1):
         warped = cv2.warpPerspective(item.frame.image, offset @ transform, (width, height))
-        x, y, box_width, box_height = item.bbox
-        surface_mask = np.zeros_like(item.mask)
-        surface_mask[y : y + box_height, x : x + box_width] = item.mask[y : y + box_height, x : x + box_width]
-        mask = cv2.warpPerspective(surface_mask, offset @ transform, (width, height), flags=cv2.INTER_NEAREST)
+        mask = cv2.warpPerspective(item.publish_mask, offset @ transform, (width, height), flags=cv2.INTER_NEAREST)
         distance = cv2.distanceTransform(mask, cv2.DIST_L2, 3) * max(item.sharpness, 1.0)
         overlap = (mask > 0) & (strength > 0)
         if np.any(overlap):
