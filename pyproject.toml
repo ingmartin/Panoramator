@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "panoramator"
-version = "0.2.0"
+version = "0.3.0"
 description = "Extensible Python package for building panoramas from video"
 readme = "README.md"
 license = "MIT"
@@ -56,6 +56,12 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "private_video: local acceptance checks that require confidential video fixtures",
+  "private_orbit: local private acceptance for orbit/unwrap scenarios",
+  "private_linear: local private acceptance for linear panorama scenarios",
+  "private_rotate: local private acceptance for rotate panorama scenarios"
+]
 
 [tool.mypy]
 files = ["src/panoramator"]

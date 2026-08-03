@@ -26,3 +26,10 @@ htmlcov/
 
 # IDE
 .DS_Store
+
+# Private acceptance inputs and local artifacts
+tests/private/**/*.mp4
+tests/private/**/*.mov
+tests/private/**/*.avi
+tests/private/**/*.mkv
+tests/private/**/_output/

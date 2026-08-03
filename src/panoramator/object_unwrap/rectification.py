@@ -277,7 +277,7 @@ def _smooth_profile(values: np.ndarray, valid: np.ndarray, window: int) -> np.nd
     indices = np.arange(len(values), dtype=np.float32)
     result[~valid] = np.interp(indices[~valid], indices[valid], result[valid])
     kernel = max(3, window | 1)
-    result = cv2.GaussianBlur(result[None, :], (kernel, 1), 0).reshape(-1)
+    result = cv2.GaussianBlur(result[None, :], (kernel, 1), 0).reshape(-1).astype(np.float32, copy=False)
     return result.astype(np.float32, copy=False)
 
 
@@ -507,7 +507,7 @@ def _effective_band_width(band_height: np.ndarray, valid: np.ndarray) -> float:
     median_height = max(float(np.median(band_height[valid])), 1.0)
     local_scale = np.clip(band_height / median_height, 0.85, 1.15)
     local_scale = np.where(valid, local_scale, 0.0)
-    return float(max(np.sum(local_scale), np.count_nonzero(valid), 1.0))
+    return max(float(np.sum(local_scale)), float(np.count_nonzero(valid)), 1.0)
 
 
 def _normalized_columns(strip: StripEstimate, target_width: int) -> np.ndarray:

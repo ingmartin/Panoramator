@@ -86,6 +86,7 @@ def test_config_json_round_trip_preserves_user_settings(tmp_path) -> None:
         ({"min_inlier_count": 0}, "min_inlier_count must be >= 1"),
         ({"min_inlier_ratio": 0.0}, "min_inlier_ratio must be between 0.0"),
         ({"motion_model": "rigid"}, "motion_model must be one of: translation, partial_affine, affine, homography"),
+        ({"capture_mode": "orbit"}, "capture_mode must be one of: auto, linear, rotation"),
         ({"ransac_threshold": 0.0}, "ransac_threshold must be > 0"),
         ({"max_reprojection_error": 0.0}, "max_reprojection_error must be > 0"),
         ({"max_scale_deviation": -0.1}, "max_scale_deviation must be >= 0"),

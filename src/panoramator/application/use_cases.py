@@ -580,17 +580,11 @@ class PanoramaBuilder:
     def _orbit_status(self, capture_mode: str, analysis: object) -> str:
         if capture_mode != "orbit":
             return "ok"
-        measurements = getattr(analysis, "measurements", {})
-        error = float(measurements.get("mean_reprojection_error", float("inf")))
-        dominant_ratio = float(measurements.get("mean_inlier_ratio", 0.0))
-        # The current global-surface path is deliberately opt-in only when its
-        # residual is low enough to be honest about the result.
-        if (
-            error > self.config.orbit_max_reprojection_error
-            or dominant_ratio < self.config.orbit_min_dominant_inlier_ratio
-        ):
-            return "orbit_not_supported_reliably"
-        return "orbit_dominant_global_surface"
+        # Orbit footage can still be detected analytically, but the scene-panorama
+        # builder has no honest publication path for it: a dominant global
+        # surface is exactly the case where unwrap/object-surface mapping is the
+        # correct product, not a perspective panorama of the surrounding scene.
+        return "orbit_not_supported_reliably"
 
     @staticmethod
     def _combined_visible_mask(warped_masks: list[np.ndarray]) -> np.ndarray | None:

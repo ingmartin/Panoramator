@@ -28,9 +28,11 @@ def resolve_strategy(config: PanoramaConfig, analysis: MotionAnalysis | None = N
     elif capture == "rotation":
         projection = "cylindrical"
     else:
-        # Orbit deliberately stays on the compatible planar pipeline.  A projection
-        # cannot correct depth parallax.
+        # Auto mode keeps the compatible planar projection unless a clean
+        # in-place rotation is detected. Object-orbit footage is handled later
+        # as an unwrap-specific case, not by switching the scene-panorama
+        # builder to another projection.
         projection = "planar"
         if capture == "orbit":
-            reason = f"{reason}; orbit_limited_to_dominant_global_surface"
+            reason = f"{reason}; orbital_capture_requires_unwrap"
     return BuildDecision(config.capture_mode, config.projection, capture, projection, confidence, reason, analysis.measurements)

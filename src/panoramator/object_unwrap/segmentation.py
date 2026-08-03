@@ -121,8 +121,8 @@ def publish_surface_mask(mask: np.ndarray, bbox: tuple[int, int, int, int]) -> n
         local = column - x
         trimmed_top = max(tops[local], smooth_top[local] - spike_tolerance)
         trimmed_bottom = min(bottoms[local], smooth_bottom[local] + spike_tolerance)
-        top = int(round(max(y, trimmed_top - margin)))
-        bottom = int(round(min(y + height - 1, trimmed_bottom + margin)))
+        top = round(max(y, trimmed_top - margin))
+        bottom = round(min(y + height - 1, trimmed_bottom + margin))
         if bottom < top:
             continue
         present = mask[top : bottom + 1, column] > 0

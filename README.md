@@ -1,43 +1,124 @@
-# panoramator
+<p align="center">
+  <img src="assets/logo.svg" width="180" alt="Panoramator">
+</p>
 
+<h1 align="center">Panoramator</h1>
+
+<p align="center">
 Python package for building panoramas from video with an extensible architecture.
+</p>
+
+<p align="center">
+
+![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
+![License](https://img.shields.io/badge/license-MIT-green.svg)
+![Coverage](https://img.shields.io/badge/coverage-92%25-brightgreen)
+![Code style](https://img.shields.io/badge/code%20style-ruff-black.svg)
+![PyPI](https://img.shields.io/pypi/v/panoramator.svg)
+![Downloads](https://img.shields.io/pypi/dm/panoramator)
+
+</p>
+
+<p align="center">
+OpenCV powered • Scene panoramas and object unwrap • Python CLI
+</p>
+
+## Quick Start
+### Install  
+```bash
+pip install panoramator
+```
+### Generate panorama  
+```bash
+panoramator build video.mp4 output.png
+```
+
+### Choose the right command
+
+* `build` - for scene panoramas from roughly linear motion or in-place camera rotation.
+* `unwrap` - for orbital capture around one object, where the goal is an observed surface map rather than a scene panorama.
+
+### Other examples
+
+```bash
+panoramator build VID_20260709_140742.mp4 output.png
+```
+
+Observed-surface unwrap uses a separate command. It writes the final PNG beside a debug directory named `*_debug` with `run.json`, `effective_config.json`, coverage, source/error maps, and intermediate mosaics:
+
+```bash
+panoramator unwrap VID20260729124935.mp4 surface.png --surface auto --allow-partial
+```
+
+When you need a cleaner crop of the observed band, enable `photo-mode` for unwrap too:
+
+```bash
+panoramator unwrap VID20260729124935.mp4 surface.png --surface auto --allow-partial --photo-mode --photo-crop-margin-px 5
+```
+
+`unwrap` now accepts a JSON config plus focused overrides such as `--sampling-step`, `--max-frames`, `--blur-threshold`, `--max-mosaic-boundary-mean-error`, and other rectification/gate parameters, mirroring the style of `build`.
+
+To suppress debug output for either command, pass `--no-save-debug-artifacts`.
+
+For videos where the fixed blur threshold is too strict:
+
+```bash
+panoramator build VID_20260709_140742.mp4 output.png --adaptive-blur-threshold
+```
+
+If frames are just slightly too soft, keep the adaptive threshold and tune the rescue sharpening instead of lowering the blur threshold too much:
+
+```bash
+panoramator build VID_20260709_140742.mp4 output.png --adaptive-blur-threshold --blur-rescue-sharpen-strength 0.25 --blur-rescue-sharpen-sigma 1.0
+```
+
+If you want a quality-oriented compromise between speed and full-resolution output, reduce only feature resolution and enable windowed frame selection:
+
+```bash
+panoramator build VID_20260709_140742.mp4 output.png --feature-downscale 0.5 --frame-selection-window-size 3
+```
+
+If seam lines are visible in the panorama, you can tune feather width and very local seam blur separately:
+
+```bash
+panoramator build VID_20260709_140742.mp4 output.png --seam-blur-kernel 7 --seam-band-width 9 --feather-blend-kernel 25
+```
+
+For a camera rotating in place, use a curved surface and optionally provide camera calibration:
+
+```bash
+panoramator build input.mp4 output.png --capture-mode rotation --horizontal-fov-degrees 70
+```
+
+If you need a photo-like frame without black corners, enable `photo-mode`. For curved panoramas it intentionally trims a small edge margin; increase it when edge artefacts remain:
+
+```bash
+panoramator build input.mp4 output.png --capture-mode rotation --photo-mode --photo-crop-margin-px 5
+```
+
 
 Capture modes are independent from projection: `--capture-mode` accepts `auto`, `linear`,
-`rotation`, or `orbit`; `--projection` accepts `auto`, `planar`, `cylindrical`, or
-`spherical`. Ambiguous automatic input preserves the compatible `linear + planar` pipeline.
-Use `--capture-mode rotation` for a camera rotating in place; it selects a cylindrical
-surface. `--focal-length-px` or `--horizontal-fov-degrees` optionally refine the camera model.
+or `rotation`; `--projection` accepts `auto`, `planar`, `cylindrical`, or `spherical`.
+Ambiguous automatic input preserves the compatible `linear + planar` pipeline. Use
+`--capture-mode rotation` for a camera rotating in place; it selects a cylindrical
+surface. Orbit around one object is not a `build` use case; use `unwrap` instead of `build`.
+`--focal-length-px` or `--horizontal-fov-degrees` optionally refine the camera model.
 
-## Status
-
-Published on PyPI and installable with pip.
-
-## License
-
-This repository is published under the MIT license. See `LICENSE`.
 
 ## Current Features
 
 * video input via OpenCV;
-* key frame selection by frame step, sharpness, and simple visual difference;
-* slight conditional frame sharpening when a frame narrowly misses the sharpness threshold;
-* optional reduced-resolution feature extraction while keeping full-resolution warping and blending;
-* smarter local frame selection by sharpest candidate in a window;
-* ORB or SIFT feature extraction;
-* feature matching and geometry estimation with `translation`, `partial_affine`, `affine`, or `homography`;
-* planar, cylindrical, and spherical projection surfaces with camera FOV/focal-length parameters;
-* global canvas construction with curved-contour bounds;
-* rotation-specific keyframe decimation, trajectory smoothing, photometric overlap correction, and seam selection;
-* feather blending with additional seam smoothing, photometric normalization, and detail-aware overlap weighting;
-* automatic black border cropping;
-* optional strict `photo-mode` crop for planar and curved panoramas, including a safety margin for curved edges;
-* narrow internal mask-gap filling for curved panoramas, with diagnostics;
-* final mild panorama sharpening;
-* `ORB -> SIFT` fallback when the valid frame chain is too short;
-* denser `sampling_step` fallback when a second pass is needed;
-* CLI for execution and diagnostics.
+* scene panorama building for `linear` and `rotation` capture;
+* observed-surface `unwrap` pipeline for orbital object capture;
+* ORB or SIFT feature extraction with geometry validation and fallback sampling;
+* planar, cylindrical, and spherical projection surfaces with optional camera calibration;
+* photometric normalization, seam handling, crop policies, and sharpening;
+* debug artifacts and local private acceptance workflows.
+
+## Practical Notes
 
 The default motion model is `affine`. For many video panorama cases, `partial_affine` is worth trying when you need tighter control over deformation between adjacent frames.
+
 By default, `blur_threshold` is fixed. The `--adaptive-blur-threshold` option enables an adaptive mode where the effective threshold is reduced according to the sharpness distribution of sampled frames from the current video.
 
 ## Installation
@@ -69,6 +150,8 @@ result = builder.build_from_video(
 )
 
 print(result.metadata)
+print(result.diagnostics.status)
+print(result.diagnostics.output_files)
 ```
 
 ## Development Setup
@@ -81,6 +164,13 @@ python -m pip install -e ".[dev]"
 
 ```bash
 pytest -q
+```
+
+Private acceptance fixtures are intentionally separate from the default reproducible suite. To run local confidential video checks:
+
+```bash
+PANORAMATOR_RUN_PRIVATE_VIDEO=1 python3 -m pytest tests/test_private_orbit_acceptance.py -q
+PANORAMATOR_RUN_PRIVATE_VIDEO=1 python3 -m pytest tests/test_private_panorama_acceptance.py -q
 ```
 
 ## Configuration Parameters
@@ -133,7 +223,7 @@ All parameters can be set through `PanoramaConfig`, a JSON config file, or parti
 
 ### Capture Mode, Projection, and Camera
 
-* `capture_mode` - `auto`, `linear`, `rotation`, or `orbit`. `auto` is deliberately conservative and falls back to `linear`. Default: `auto`.
+* `capture_mode` - `auto`, `linear`, or `rotation`. For orbital capture around one object, use `unwrap` instead of `build`. `auto` is deliberately conservative and falls back to `linear`. Default: `auto`.
 * `projection` - `auto`, `planar`, `cylindrical`, or `spherical`. An explicit projection overrides automatic surface selection. Default: `auto`.
 * `focal_length_px` or `horizontal_fov_degrees` - optional mutually exclusive camera calibration inputs for curved projections.
 * `projection_center_x`, `projection_center_y` - optional principal point in source pixels.
@@ -233,69 +323,9 @@ All parameters can be set through `PanoramaConfig`, a JSON config file, or parti
   "max_inscribed_crop_width_loss": 0.25,
   "trajectory_smoothing_window": 5,
   "max_rotation_scale_correction": 0.02,
-  "orbit_max_reprojection_error": 3.5,
-  "orbit_min_dominant_inlier_ratio": 0.55,
   "enable_final_sharpening": true,
   "final_sharpen_strength": 0.15,
   "final_sharpen_sigma": 1.0,
   "save_debug_artifacts": true
 }
-```
-
-## Quick Start
-
-```bash
-panoramator build VID_20260709_140742.mp4 output.png
-```
-
-Observed-surface unwrap uses a separate command. It writes the final PNG beside a debug directory named `*_debug` with `run.json`, `effective_config.json`, coverage, source/error maps, and intermediate mosaics:
-
-```bash
-panoramator unwrap VID20260729124935.mp4 surface.png --surface auto --allow-partial
-```
-
-When you need a cleaner crop of the observed band, enable `photo-mode` for unwrap too:
-
-```bash
-panoramator unwrap VID20260729124935.mp4 surface.png --surface auto --allow-partial --photo-mode --photo-crop-margin-px 5
-```
-
-`unwrap` now accepts a JSON config plus focused overrides such as `--sampling-step`, `--max-frames`, `--blur-threshold`, `--max-mosaic-boundary-mean-error`, and other rectification/gate parameters, mirroring the style of `build`.
-
-To suppress debug output for either command, pass `--no-save-debug-artifacts`.
-
-For videos where the fixed blur threshold is too strict:
-
-```bash
-panoramator build VID_20260709_140742.mp4 output.png --adaptive-blur-threshold
-```
-
-If frames are just slightly too soft, keep the adaptive threshold and tune the rescue sharpening instead of lowering the blur threshold too much:
-
-```bash
-panoramator build VID_20260709_140742.mp4 output.png --adaptive-blur-threshold --blur-rescue-sharpen-strength 0.25 --blur-rescue-sharpen-sigma 1.0
-```
-
-If you want a quality-oriented compromise between speed and full-resolution output, reduce only feature resolution and enable windowed frame selection:
-
-```bash
-panoramator build VID_20260709_140742.mp4 output.png --feature-downscale 0.5 --frame-selection-window-size 3
-```
-
-If seam lines are visible in the panorama, you can tune feather width and very local seam blur separately:
-
-```bash
-panoramator build VID_20260709_140742.mp4 output.png --seam-blur-kernel 7 --seam-band-width 9 --feather-blend-kernel 25
-```
-
-For a camera rotating in place, use a curved surface and optionally provide camera calibration:
-
-```bash
-panoramator build input.mp4 output.png --capture-mode rotation --horizontal-fov-degrees 70
-```
-
-If you need a photo-like frame without black corners, enable `photo-mode`. For curved panoramas it intentionally trims a small edge margin; increase it when edge artefacts remain:
-
-```bash
-panoramator build input.mp4 output.png --capture-mode rotation --photo-mode --photo-crop-margin-px 5
 ```

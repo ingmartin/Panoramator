@@ -9,7 +9,14 @@ import panoramator.io.video as video_module
 from panoramator.cli import main as cli_main
 from panoramator.config.models import PanoramaConfig
 from panoramator.domain.models import PanoramaDiagnostics, PanoramaResult, VideoMetadata
-from panoramator.object_unwrap.models import PublishProfile, SurfaceKind, UnwrapConfig, UnwrapDiagnostics, UnwrapResult, UnwrapStatus
+from panoramator.object_unwrap.models import (
+    PublishProfile,
+    SurfaceKind,
+    UnwrapConfig,
+    UnwrapDiagnostics,
+    UnwrapResult,
+    UnwrapStatus,
+)
 
 
 def _build_args(**overrides) -> argparse.Namespace:

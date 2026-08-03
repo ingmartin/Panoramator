@@ -1,0 +1,8 @@
+*
+!.gitignore
+!showcase.md
+!showcase.ru.md
+!roadmap.md
+!roadmap.ru.md
+!public-demo/
+!public-demo/**

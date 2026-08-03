@@ -17,6 +17,7 @@ from panoramator.domain.models import (
     SelectedFrame,
     VideoMetadata,
 )
+from panoramator.projection.models import CylindricalProjection, PlanarProjection, SphericalProjection
 
 
 def _selected_frame(index: int) -> SelectedFrame:
@@ -212,3 +213,61 @@ def test_read_metadata_and_select_frames_close_video_source(monkeypatch) -> None
     assert len(selected) == 1
     assert rejected == []
     assert events == ["open", "close", "open", "iter", "close", "select"]
+
+
+def test_geometry_projection_respects_explicit_projection_and_rotation_mode() -> None:
+    frame = Frame(index=0, timestamp_seconds=0.0, image=np.zeros((12, 16, 3), dtype=np.uint8))
+
+    planar = PanoramaBuilder(PanoramaConfig(capture_mode="linear", projection="auto"))._geometry_projection(
+        PanoramaConfig(capture_mode="linear", projection="auto"),
+        frame,
+    )
+    cylindrical = PanoramaBuilder(
+        PanoramaConfig(capture_mode="rotation", projection="auto")
+    )._geometry_projection(PanoramaConfig(capture_mode="rotation", projection="auto"), frame)
+    spherical = PanoramaBuilder(PanoramaConfig(projection="spherical"))._geometry_projection(
+        PanoramaConfig(projection="spherical"),
+        frame,
+    )
+
+    assert isinstance(planar, PlanarProjection)
+    assert isinstance(cylindrical, CylindricalProjection)
+    assert isinstance(spherical, SphericalProjection)
+
+
+def test_sampling_steps_skip_non_improving_fallback_values() -> None:
+    assert PanoramaBuilder(PanoramaConfig(sampling_step=8, fallback_sampling_step=8))._sampling_steps_to_try() == [8]
+    assert PanoramaBuilder(PanoramaConfig(sampling_step=8, fallback_sampling_step=12))._sampling_steps_to_try() == [8]
+
+
+def test_cylindrical_preview_returns_none_when_preview_chain_is_too_short(monkeypatch) -> None:
+    builder = PanoramaBuilder(PanoramaConfig())
+    chain = _ChainBuildResult(
+        backend="orb",
+        sampling_step=15,
+        attempted_backends=["orb"],
+        attempted_sampling_steps=[15],
+        selected_frames=[_selected_frame(0), _selected_frame(1)],
+        rejected_frames=[],
+        filtered_frames=[_selected_frame(0), _selected_frame(1)],
+        pairwise_homographies=[np.eye(3)],
+        pair_metrics=[],
+    )
+
+    monkeypatch.setattr(
+        builder,
+        "_build_chain_with_fallback",
+        lambda selected_frames, rejected_frames, config, attempted_sampling_steps: _ChainBuildResult(
+            backend="orb",
+            sampling_step=config.sampling_step,
+            attempted_backends=["orb"],
+            attempted_sampling_steps=attempted_sampling_steps,
+            selected_frames=selected_frames,
+            rejected_frames=rejected_frames,
+            filtered_frames=selected_frames[:1],
+            pairwise_homographies=[],
+            pair_metrics=[],
+        ),
+    )
+
+    assert builder._build_cylindrical_preview(chain) is None

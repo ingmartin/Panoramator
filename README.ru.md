@@ -1,13 +1,108 @@
-# panoramator
+<p align="center">
+  <img src="assets/logo.svg" width="180" alt="Panoramator">
+</p>
 
+<h1 align="center">Panoramator</h1>
+
+<p align="center">
 Python-пакет для построения панорам из видео с расширяемой архитектурой.
+</p>
 
-Режим съёмки и проекция задаются независимо: `--capture-mode` принимает `auto`, `linear`,
-`rotation`, `orbit`, а `--projection` — `auto`, `planar`, `cylindrical`, `spherical`.
+<p align="center">
+
+![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
+![License](https://img.shields.io/badge/license-MIT-green.svg)
+![Coverage](https://img.shields.io/badge/coverage-92%25-brightgreen)
+![Code style](https://img.shields.io/badge/code%20style-ruff-black.svg)
+![PyPI](https://img.shields.io/pypi/v/panoramator.svg)
+![Downloads](https://img.shields.io/pypi/dm/panoramator)
+
+</p>
+
+
+## Быстрый запуск
+
+### Установка
+
+```bash
+pip install panoramator
+```
+
+### Построить панораму
+
+```bash
+panoramator build video.mp4 output.png
+```
+
+### Какую команду использовать
+
+* `build` - для панорам сцены при примерно линейном движении камеры или повороте на месте.
+* `unwrap` - для облёта одного объекта, когда нужен не снимок сцены, а развёртка наблюдаемой поверхности.
+
+### Другие примеры
+
+```bash
+panoramator build VID_20260709_140742.mp4 output.png
+```
+
+Для развёртки наблюдаемой поверхности используйте отдельную команду `unwrap`. Рядом с итоговым PNG она создаёт debug-директорию `*_debug` с `run.json`, `effective_config.json`, coverage, source/error map и промежуточными mosaic-артефактами:
+
+```bash
+panoramator unwrap VID20260729124935.mp4 surface.png --surface auto --allow-partial
+```
+
+Если нужна более строгая подрезка только по реально видимой полосе, включите `photo-mode` и для `unwrap`:
+
+```bash
+panoramator unwrap VID20260729124935.mp4 surface.png --surface auto --allow-partial --photo-mode --photo-crop-margin-px 5
+```
+
+`unwrap` принимает JSON-конфиг и точечные CLI-переопределения вроде `--sampling-step`, `--max-frames`, `--blur-threshold`, `--max-mosaic-boundary-mean-error` и других параметров rectification/gate, по той же схеме, что и `build`.
+
+Чтобы не сохранять debug-артефакты ни для `build`, ни для `unwrap`, используйте `--no-save-debug-artifacts`.
+
+Если фиксированный порог резкости слишком строгий:
+
+```bash
+panoramator build VID_20260709_140742.mp4 output.png --adaptive-blur-threshold
+```
+
+Если кадры лишь немного не дотягивают по резкости, лучше оставить adaptive threshold и подстроить rescue sharpening, а не слишком сильно снижать blur threshold:
+
+```bash
+panoramator build VID_20260709_140742.mp4 output.png --adaptive-blur-threshold --blur-rescue-sharpen-strength 0.25 --blur-rescue-sharpen-sigma 1.0
+```
+
+Если нужен компромисс в пользу качества при разумной скорости, уменьшайте только разрешение для признаков и включайте оконный выбор кадров:
+
+```bash
+panoramator build VID_20260709_140742.mp4 output.png --feature-downscale 0.5 --frame-selection-window-size 3
+```
+
+Если на панораме заметны швы, можно отдельно подстроить feather width и очень локальное seam blur:
+
+```bash
+panoramator build VID_20260709_140742.mp4 output.png --seam-blur-kernel 7 --seam-band-width 9 --feather-blend-kernel 25
+```
+
+Для поворота камеры на месте используйте криволинейную поверхность и при необходимости задайте калибровку камеры:
+
+```bash
+panoramator build input.mp4 output.png --capture-mode rotation --horizontal-fov-degrees 70
+```
+
+Если нужен кадр без чёрных углов, включите `photo-mode`. Для криволинейных панорам он специально подрезает небольшой край маски, и этот отступ можно увеличить:
+
+```bash
+panoramator build input.mp4 output.png --capture-mode rotation --photo-mode --photo-crop-margin-px 5
+```
+
+Режим съёмки и проекция задаются независимо: `--capture-mode` принимает `auto`, `linear`
+или `rotation`, а `--projection` — `auto`, `planar`, `cylindrical`, `spherical`.
 Неоднозначный автоматический выбор сохраняет совместимый pipeline `linear + planar`.
 Для поворота камеры на месте задайте `--capture-mode rotation`: он выбирает цилиндрическую
-поверхность. Модель камеры можно уточнить через `--focal-length-px` или
-`--horizontal-fov-degrees`.
+поверхность. Для облёта одного объекта используйте `unwrap`, а не `build`. Модель камеры
+можно уточнить через `--focal-length-px` или `--horizontal-fov-degrees`.
 
 ## Статус
 
@@ -20,25 +115,17 @@ Python-пакет для построения панорам из видео с 
 ## Возможности текущей версии
 
 * чтение видео через OpenCV;
-* отбор ключевых кадров по шагу, резкости и простому отличию;
-* лёгкое условное повышение резкости кадра, если он лишь немного не проходит порог sharpness;
-* опциональное извлечение признаков на уменьшенной копии кадра при full-resolution warp/blend;
-* более умный локальный отбор кадров по самому резкому кандидату в окне;
-* извлечение признаков ORB или SIFT;
-* сопоставление признаков и оценка геометрии с `translation` / `partial_affine` / `affine` / `homography`;
-* плоская, цилиндрическая и сферическая поверхности проекции с параметрами FOV/фокусного расстояния камеры;
-* построение общего холста с границами по контуру для криволинейных проекций;
-* разрежение keyframes, сглаживание траектории, фотометрическая коррекция overlap и поиск seam для `rotation`;
-* feather-blending с дополнительным сглаживанием seam-зон, photometric normalization и учётом локальной резкости в overlap-зонах;
-* автообрезка чёрных полей;
-* строгий `photo-mode` для плоских и криволинейных панорам с защитным отступом на границах криволинейной проекции;
-* заполнение узких внутренних разрывов маски в криволинейных панорамах с диагностикой;
-* мягкий финальный sharpening уже готовой панорамы;
-* fallback `ORB -> SIFT`, если цепочка валидных кадров получилась слишком короткой;
-* fallback на более плотный `sampling_step`, если нужно подобрать более резкие кадры;
-* CLI для запуска и диагностики.
+* построение панорам сцены для `linear` и `rotation`;
+* pipeline `unwrap` для развёртки наблюдаемой поверхности при облёте объекта;
+* извлечение признаков ORB или SIFT с валидацией геометрии и fallback по sampling;
+* плоская, цилиндрическая и сферическая проекции с необязательной калибровкой камеры;
+* photometric normalization, обработка швов, политики crop и sharpening;
+* debug-артефакты и локальные private acceptance-проверки.
+
+## Практические замечания
 
 По умолчанию используется модель движения `affine`. Для многих видеопанорам стоит отдельно попробовать `partial_affine`, если нужно сильнее ограничить деформации между кадрами.
+
 По умолчанию `blur_threshold` фиксированный. Опция `--adaptive-blur-threshold` включает адаптивный режим, в котором фактический порог понижается по распределению резкости sampled-кадров текущего видео.
 
 ## Установка
@@ -70,6 +157,8 @@ result = builder.build_from_video(
 )
 
 print(result.metadata)
+print(result.diagnostics.status)
+print(result.diagnostics.output_files)
 ```
 
 ## Установка для разработки
@@ -82,6 +171,13 @@ python -m pip install -e ".[dev]"
 
 ```bash
 pytest -q
+```
+
+Private acceptance-фикстуры намеренно отделены от обычного воспроизводимого набора. Для локальной проверки конфиденциальных видео:
+
+```bash
+PANORAMATOR_RUN_PRIVATE_VIDEO=1 python3 -m pytest tests/test_private_orbit_acceptance.py -q
+PANORAMATOR_RUN_PRIVATE_VIDEO=1 python3 -m pytest tests/test_private_panorama_acceptance.py -q
 ```
 
 ## Параметры конфигурации
@@ -134,7 +230,7 @@ pytest -q
 
 ### Режим съёмки, проекция и камера
 
-* `capture_mode` - `auto`, `linear`, `rotation` или `orbit`. `auto` намеренно консервативен и при неоднозначности выбирает `linear`. По умолчанию `auto`.
+* `capture_mode` - `auto`, `linear` или `rotation`. Для облёта одного объекта используйте `unwrap`, а не `build`. `auto` намеренно консервативен и при неоднозначности выбирает `linear`. По умолчанию `auto`.
 * `projection` - `auto`, `planar`, `cylindrical` или `spherical`. Явно заданная проекция имеет приоритет над автоматическим выбором. По умолчанию `auto`.
 * `focal_length_px` или `horizontal_fov_degrees` - взаимоисключающие необязательные параметры калибровки камеры для криволинейных проекций.
 * `projection_center_x`, `projection_center_y` - необязательная главная точка в пикселях исходного кадра.
@@ -234,8 +330,6 @@ pytest -q
   "max_inscribed_crop_width_loss": 0.25,
   "trajectory_smoothing_window": 5,
   "max_rotation_scale_correction": 0.02,
-  "orbit_max_reprojection_error": 3.5,
-  "orbit_min_dominant_inlier_ratio": 0.55,
   "enable_final_sharpening": true,
   "final_sharpen_strength": 0.15,
   "final_sharpen_sigma": 1.0,
@@ -243,23 +337,6 @@ pytest -q
 }
 ```
 
-## Быстрый запуск
-
-```bash
-panoramator build VID_20260709_140742.mp4 output.png
-```
-
-Для развёртки наблюдаемой поверхности используйте отдельную команду `unwrap`. Рядом с итоговым PNG она создаёт debug-директорию `*_debug` с `run.json`, `effective_config.json`, coverage, source/error map и промежуточными mosaic-артефактами:
-
-```bash
-panoramator unwrap VID20260729124935.mp4 surface.png --surface auto --allow-partial
-```
-
-Если нужна более строгая подрезка только по реально видимой полосе, включите `photo-mode` и для `unwrap`:
-
-```bash
-panoramator unwrap VID20260729124935.mp4 surface.png --surface auto --allow-partial --photo-mode --photo-crop-margin-px 5
-```
 
 `unwrap` теперь принимает JSON-конфиг и точечные overrides в том же стиле, что и `build`: например `--sampling-step`, `--max-frames`, `--blur-threshold`, `--max-mosaic-boundary-mean-error` и параметры quality gate / rectification.
 

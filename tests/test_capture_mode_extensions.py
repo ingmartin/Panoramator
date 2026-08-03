@@ -175,11 +175,11 @@ def test_auto_cylindrical_preview_reuses_selected_frames_and_requires_a_valid_ch
     assert (config.capture_mode, config.projection, config.sampling_step) == ("rotation", "cylindrical", 8)
 
 
-def test_orbit_output_requires_residual_and_dominant_inlier_quality() -> None:
-    builder = PanoramaBuilder(PanoramaConfig(orbit_max_reprojection_error=3.5, orbit_min_dominant_inlier_ratio=0.7))
+def test_orbit_output_is_always_rejected_for_scene_panorama_building() -> None:
+    builder = PanoramaBuilder(PanoramaConfig())
 
     assert builder._orbit_status("orbit", MotionAnalysis("orbit", 1.0, "test", {"mean_reprojection_error": 2.0, "mean_inlier_ratio": 0.6})) == "orbit_not_supported_reliably"
-    assert builder._orbit_status("orbit", MotionAnalysis("orbit", 1.0, "test", {"mean_reprojection_error": 2.0, "mean_inlier_ratio": 0.8})) == "orbit_dominant_global_surface"
+    assert builder._orbit_status("orbit", MotionAnalysis("orbit", 1.0, "test", {"mean_reprojection_error": 2.0, "mean_inlier_ratio": 0.8})) == "orbit_not_supported_reliably"
 
 
 def test_rotation_baseline_default_is_conservative_for_handheld_capture() -> None:

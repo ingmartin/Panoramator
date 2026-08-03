@@ -8,7 +8,12 @@ import numpy as np
 from panoramator.domain.models import Frame
 
 from .models import SurfaceKind, UnwrapConfig, UnwrapStatus
-from .segmentation import masked_sharpness, object_mask, publish_surface_mask, stable_surface_bbox
+from .segmentation import (
+    masked_sharpness,
+    object_mask,
+    publish_surface_mask,
+    stable_surface_bbox,
+)
 
 
 @dataclass(slots=True)

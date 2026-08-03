@@ -74,6 +74,23 @@ def test_artifacts_include_source_and_reprojection_error_maps(tmp_path) -> None:
     assert str(tmp_path / "unwrap_debug" / "reprojection_error.png") in files
 
 
+def test_artifacts_write_json_sidecars_for_non_image_payloads(tmp_path) -> None:
+    output = tmp_path / "unwrap.png"
+    diagnostics = UnwrapDiagnostics(UnwrapStatus.OK, "ok", "", SurfaceKind.CYLINDRICAL)
+
+    files = write_artifacts(
+        output,
+        UnwrapConfig(),
+        diagnostics,
+        None,
+        {"pose_pairs": [{"left": 0, "right": 1, "accepted": True}]},
+    )
+
+    artifact_path = tmp_path / "unwrap_debug" / "pose_pairs.json"
+    assert str(artifact_path) in files
+    assert json.loads(artifact_path.read_text(encoding="utf-8")) == [{"left": 0, "right": 1, "accepted": True}]
+
+
 def test_monotonic_trajectory_rejects_reversed_outlier_without_reordering_frames() -> None:
     trajectory = solve_monotonic_trajectory([(0.10, 0.9), (0.11, 0.9), (-0.8, 0.95), (0.09, 0.9)])
 

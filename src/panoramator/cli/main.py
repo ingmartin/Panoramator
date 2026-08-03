@@ -128,7 +128,7 @@ def build_command(args: argparse.Namespace) -> int:
     if result.diagnostics.status != "orbit_not_supported_reliably":
         print(f"Panorama saved to: {args.output_path}")
     else:
-        print("Panorama was not written: capture mode is not supported reliably")
+        print("Panorama was not written: orbit capture is not supported for reliable scene panoramas; use unwrap for object-surface output")
     print(f"Selected frames: {len(result.diagnostics.selected_frames)}")
     print(f"Rejected frames: {len(result.diagnostics.rejected_frames)}")
     print(f"Feature backend: {result.diagnostics.feature_backend}")
@@ -265,7 +265,7 @@ def create_parser() -> argparse.ArgumentParser:
     build.add_argument("--blur-rescue-sharpen-sigma", type=float)
     build.add_argument("--frame-selection-window-size", type=int)
     build.add_argument("--motion-model", choices=["translation", "partial_affine", "affine", "homography"])
-    build.add_argument("--capture-mode", choices=["auto", "linear", "rotation", "orbit"])
+    build.add_argument("--capture-mode", choices=["auto", "linear", "rotation"])
     build.add_argument("--projection", choices=["auto", "planar", "cylindrical", "spherical"])
     build.add_argument("--focal-length-px", type=float)
     build.add_argument("--horizontal-fov-degrees", type=float)
