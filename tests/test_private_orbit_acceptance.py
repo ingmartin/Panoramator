@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -67,13 +68,13 @@ def test_private_orbit_unwrap_acceptance(case: dict[str, object], tmp_path: Path
     if allowed_statuses is None:
         assert result.diagnostics.status.value == case["expected_status"]
     else:
-        assert result.diagnostics.status.value in allowed_statuses
+        assert result.diagnostics.status.value in cast(list[str], allowed_statuses)
     assert result.diagnostics.surface_kind.value == case["expected_surface_kind"]
-    assert len(result.diagnostics.selected_frames) >= int(case["min_selected_frames"])
+    assert len(result.diagnostics.selected_frames) >= int(cast(Any, case["min_selected_frames"]))
 
-    coverage = float(measurements.get("surface_coverage_fraction", 0.0))
-    assert coverage >= float(case["min_surface_coverage_fraction"])
-    assert coverage <= float(case["max_surface_coverage_fraction"])
+    coverage = float(cast(Any, measurements.get("surface_coverage_fraction", 0.0)))
+    assert coverage >= float(cast(Any, case["min_surface_coverage_fraction"]))
+    assert coverage <= float(cast(Any, case["max_surface_coverage_fraction"]))
 
     expect_output = case.get("expect_output")
     if expect_output is True:

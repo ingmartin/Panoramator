@@ -54,6 +54,7 @@ def test_estimate_translation_model_returns_valid_geometry() -> None:
 
     assert result.valid is True
     assert result.reason == "ok"
+    assert result.homography is not None
     assert np.allclose(result.homography, np.array([[1.0, 0.0, -2.0], [0.0, 1.0, -3.0], [0.0, 0.0, 1.0]]))
 
 

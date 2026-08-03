@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import numpy as np
 import pytest
 
@@ -34,7 +36,7 @@ def test_config_validates_and_normalizes_capture_settings() -> None:
 )
 def test_config_rejects_non_finite_or_ambiguous_camera_parameters(settings: dict[str, float], message: str) -> None:
     with pytest.raises(ValueError, match=message):
-        PanoramaConfig(**settings)
+        PanoramaConfig(**cast(dict[str, Any], settings))
 
 
 def test_explicit_projection_overrides_auto_strategy() -> None:
@@ -159,7 +161,7 @@ def test_motion_analyzer_is_conservative_without_chain_evidence() -> None:
 
 
 def test_motion_analyzer_falls_back_for_malformed_or_nonfinite_geometry() -> None:
-    metrics = [{"valid": True, "reprojection_error": 1.0}]
+    metrics: list[dict[str, object]] = [{"valid": True, "reprojection_error": 1.0}]
 
     assert MotionAnalyzer().analyze([np.eye(2)], metrics) == MotionAnalysis.fallback()
     assert MotionAnalyzer().analyze([np.full((3, 3), np.nan)], metrics) == MotionAnalysis.fallback()
@@ -168,7 +170,7 @@ def test_motion_analyzer_falls_back_for_malformed_or_nonfinite_geometry() -> Non
 
 def test_motion_analyzer_classifies_stable_rotation_and_orbit_risk() -> None:
     rotation = np.array([[0.999, -0.05, 5.0], [0.05, 0.999, 1.0], [0.0, 0.0, 1.0]])
-    valid_metrics = [{"valid": True, "reprojection_error": 1.0}, {"valid": True, "reprojection_error": 1.1}]
+    valid_metrics: list[dict[str, object]] = [{"valid": True, "reprojection_error": 1.0}, {"valid": True, "reprojection_error": 1.1}]
 
     rotation_analysis = MotionAnalyzer().analyze([rotation, rotation], valid_metrics)
     orbit_analysis = MotionAnalyzer().analyze([np.diag([1.0, 1.0, 1.0]), np.diag([1.3, 1.3, 1.0])], valid_metrics)
@@ -181,11 +183,11 @@ def test_motion_analyzer_classifies_stable_rotation_and_orbit_risk() -> None:
 def test_motion_analyzer_requires_a_better_cylindrical_preview_for_auto_rotation() -> None:
     planar = [np.array([[1.0, 0.0, 8.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])] * 2
     cylindrical = [np.array([[1.0, 0.0, 8.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])] * 2
-    planar_metrics = [
+    planar_metrics: list[dict[str, object]] = [
         {"valid": True, "reprojection_error": 3.0, "inliers": 16, "good_matches": 20},
         {"valid": True, "reprojection_error": 3.0, "inliers": 16, "good_matches": 20},
     ]
-    cylindrical_metrics = [
+    cylindrical_metrics: list[dict[str, object]] = [
         {"valid": True, "reprojection_error": 1.0, "inliers": 17, "good_matches": 20},
         {"valid": True, "reprojection_error": 1.0, "inliers": 17, "good_matches": 20},
     ]
@@ -199,7 +201,7 @@ def test_motion_analyzer_requires_a_better_cylindrical_preview_for_auto_rotation
 
 def test_motion_analyzer_keeps_auto_linear_when_cylindrical_preview_is_not_better() -> None:
     transforms = [np.array([[1.0, 0.0, 8.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])] * 2
-    metrics = [{"valid": True, "reprojection_error": 1.0, "inliers": 16, "good_matches": 20}] * 2
+    metrics: list[dict[str, object]] = [{"valid": True, "reprojection_error": 1.0, "inliers": 16, "good_matches": 20}] * 2
 
     analysis = MotionAnalyzer().analyze(transforms, metrics, (transforms, metrics))
 

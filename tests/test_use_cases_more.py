@@ -1,7 +1,9 @@
+# mypy: disable-error-code="method-assign,assignment,arg-type"
 from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -17,7 +19,11 @@ from panoramator.domain.models import (
     SelectedFrame,
     VideoMetadata,
 )
-from panoramator.projection.models import CylindricalProjection, PlanarProjection, SphericalProjection
+from panoramator.projection.models import (
+    CylindricalProjection,
+    PlanarProjection,
+    SphericalProjection,
+)
 
 
 def _selected_frame(index: int) -> SelectedFrame:
@@ -29,8 +35,8 @@ def _selected_frame(index: int) -> SelectedFrame:
 
 def test_build_from_video_requires_two_selected_frames(tmp_path) -> None:
     builder = PanoramaBuilder(PanoramaConfig(save_debug_artifacts=False))
-    builder._read_metadata = lambda _: VideoMetadata(path=Path("input.mp4"), fps=30.0, frame_count=1, width=4, height=4)
-    builder._build_best_chain = lambda _: _ChainBuildResult(
+    cast(Any, builder)._read_metadata = lambda _: VideoMetadata(path=Path("input.mp4"), fps=30.0, frame_count=1, width=4, height=4)
+    cast(Any, builder)._build_best_chain = lambda _: _ChainBuildResult(
         backend="orb",
         sampling_step=15,
         attempted_backends=["orb"],
@@ -49,8 +55,8 @@ def test_build_from_video_requires_two_selected_frames(tmp_path) -> None:
 def test_build_from_video_requires_valid_geometry_chain(tmp_path) -> None:
     builder = PanoramaBuilder(PanoramaConfig(save_debug_artifacts=False))
     selected = [_selected_frame(0), _selected_frame(1)]
-    builder._read_metadata = lambda _: VideoMetadata(path=Path("input.mp4"), fps=30.0, frame_count=2, width=4, height=4)
-    builder._build_best_chain = lambda _: _ChainBuildResult(
+    cast(Any, builder)._read_metadata = lambda _: VideoMetadata(path=Path("input.mp4"), fps=30.0, frame_count=2, width=4, height=4)
+    cast(Any, builder)._build_best_chain = lambda _: _ChainBuildResult(
         backend="orb",
         sampling_step=15,
         attempted_backends=["orb"],
@@ -72,6 +78,7 @@ def test_combined_visible_mask_merges_all_masks() -> None:
 
     mask = PanoramaBuilder._combined_visible_mask([first, second])
 
+    assert mask is not None
     assert np.array_equal(mask, np.array([[0, 255], [255, 0]], dtype=np.uint8))
 
 
@@ -96,8 +103,8 @@ def test_build_chain_rejects_pair_that_would_exceed_canvas_limit(monkeypatch) ->
         "panoramator.application.use_cases.create_feature_extractor",
         lambda config: SimpleNamespace(extract=lambda frame: features),
     )
-    builder.matcher = SimpleNamespace(match=lambda left, right: MatchSet(8, [], 1.0))
-    builder.geometry = SimpleNamespace(
+    cast(Any, builder).matcher = SimpleNamespace(match=lambda left, right: MatchSet(8, [], 1.0))
+    cast(Any, builder).geometry = SimpleNamespace(
         estimate=lambda *args: PairGeometry(oversized_transform, 8, 0.0, True, "ok")
     )
 
@@ -110,8 +117,9 @@ def test_build_chain_rejects_pair_that_would_exceed_canvas_limit(monkeypatch) ->
 
 
 def test_is_better_chain_prefers_longer_valid_chain() -> None:
-    smaller = _ChainBuildResult("orb", 15, ["orb"], [15], [1, 2, 3], [], [1, 2], [], [])
-    larger = _ChainBuildResult("orb", 15, ["orb"], [15], [1, 2, 3], [], [1, 2, 3], [], [])
+    selected = [_selected_frame(0), _selected_frame(1), _selected_frame(2)]
+    smaller = _ChainBuildResult("orb", 15, ["orb"], [15], selected, [], selected[:2], [], [])
+    larger = _ChainBuildResult("orb", 15, ["orb"], [15], selected, [], selected, [], [])
 
     assert PanoramaBuilder._is_better_chain(larger, smaller) is True
     assert PanoramaBuilder._is_better_chain(smaller, larger) is False

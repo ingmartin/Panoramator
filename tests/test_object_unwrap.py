@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any, cast
 
 import cv2
 import numpy as np
@@ -40,13 +41,13 @@ def test_cylinder_builder_creates_alpha_coverage_and_low_coverage_seam() -> None
     assert image.shape[0] == 80
     assert image.shape[1] <= 200
     assert coverage.shape == image.shape[:2]
-    assert 0 < measurements["coverage_fraction"] <= 1
+    assert 0 < float(cast(Any, measurements["coverage_fraction"])) <= 1
     assert model.kind is SurfaceKind.CYLINDRICAL
     assert least_covered_seam(coverage) == 0
-    assert artifacts["source"].shape == coverage.shape
-    assert artifacts["reprojection_error"].shape == coverage.shape
+    assert cast(np.ndarray, artifacts["source"]).shape == coverage.shape
+    assert cast(np.ndarray, artifacts["reprojection_error"]).shape == coverage.shape
     assert measurements["rendering"] == "feature_mosaic_then_global_rectification"
-    assert artifacts["angular_mosaic"].shape[0] == 80
+    assert cast(np.ndarray, artifacts["angular_mosaic"]).shape[0] == 80
 
 
 def test_artifacts_keep_png_in_diagnostic_file_list(tmp_path) -> None:
@@ -142,7 +143,7 @@ def test_unwrap_config_json_round_trip_normalizes_surface_kind(tmp_path) -> None
 )
 def test_unwrap_config_rejects_invalid_photo_mode_crop_thresholds(settings: dict[str, float], message: str) -> None:
     with np.testing.assert_raises_regex(ValueError, message):
-        UnwrapConfig(**settings).validate()
+        UnwrapConfig(**cast(dict[str, Any], settings)).validate()
 
 
 def test_image_pose_graph_marks_surface_supported_translation() -> None:
@@ -160,4 +161,4 @@ def test_image_pose_graph_marks_surface_supported_translation() -> None:
 
     assert len(graph.edges) == 1
     assert graph.edges[0]["reason"] == "ok"
-    assert graph.edges[0]["surface_inliers"] >= 8
+    assert int(cast(Any, graph.edges[0]["surface_inliers"])) >= 8

@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 import pytest
 
 from panoramator.config.models import PanoramaConfig
@@ -105,4 +107,4 @@ def test_config_json_round_trip_preserves_user_settings(tmp_path) -> None:
 )
 def test_config_rejects_invalid_pipeline_settings(settings: dict[str, object], message: str) -> None:
     with pytest.raises(ValueError, match=message):
-        PanoramaConfig(**settings)
+        PanoramaConfig(**cast(dict[str, Any], settings))

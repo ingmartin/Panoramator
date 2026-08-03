@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -65,8 +66,8 @@ def _run_case(case: dict[str, object], tmp_path: Path) -> None:
     assert diagnostics.status == case["expected_status"]
     assert diagnostics.capture_mode == case["expected_capture_mode"]
     assert diagnostics.projection == case["expected_projection"]
-    assert len(diagnostics.selected_frames) >= int(case["min_selected_frames"])
-    assert diagnostics.sampling_step == int(case["expected_sampling_step"])
+    assert len(diagnostics.selected_frames) >= int(cast(Any, case["min_selected_frames"]))
+    assert diagnostics.sampling_step == int(cast(Any, case["expected_sampling_step"]))
     assert diagnostics.fallback_used is bool(case["expected_fallback_used"])
     assert result.image is not None
     assert output_path.exists()

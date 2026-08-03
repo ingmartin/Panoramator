@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import numpy as np
 
 from panoramator.application.use_cases import PanoramaBuilder, _ChainBuildResult
@@ -228,7 +230,7 @@ def test_rotation_canvas_limit_uses_curved_projection(monkeypatch) -> None:
 
     monkeypatch.setattr(builder.canvas_builder, "build", fake_build)
 
-    assert builder._fits_canvas(selected, [np.eye(3)], CylindricalProjection) is True
+    assert builder._fits_canvas(selected, [np.eye(3)], cast(Any, CylindricalProjection)) is True
     assert captured["projection"] is CylindricalProjection
 
 

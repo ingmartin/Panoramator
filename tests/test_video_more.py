@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import numpy as np
 import pytest
 
@@ -67,7 +69,7 @@ def test_open_closes_an_existing_capture(monkeypatch) -> None:
     new_capture = _FakeCapture()
     monkeypatch.setattr(video_module.cv2, "VideoCapture", lambda path: new_capture)
     source = OpenCVVideoSource("video.mp4", PanoramaConfig())
-    source.capture = previous_capture
+    cast(Any, source).capture = previous_capture
 
     source.open()
 
@@ -83,7 +85,7 @@ def test_iter_frames_requires_open_capture() -> None:
 def test_iter_frames_returns_targeted_frames_when_count_is_known() -> None:
     config = PanoramaConfig(sampling_step=2, max_frames=2)
     source = OpenCVVideoSource("video.mp4", config)
-    source.capture = _FakeCapture(frames=[np.full((4, 4, 3), fill_value=index, dtype=np.uint8) for index in range(5)])
+    cast(Any, source).capture = _FakeCapture(frames=[np.full((4, 4, 3), fill_value=index, dtype=np.uint8) for index in range(5)])
 
     frames = source.iter_frames()
 
@@ -110,7 +112,7 @@ def test_target_frame_indices_return_empty_for_unknown_count() -> None:
 def test_close_releases_existing_capture() -> None:
     source = OpenCVVideoSource("video.mp4", PanoramaConfig())
     capture = _FakeCapture()
-    source.capture = capture
+    cast(Any, source).capture = capture
 
     source.close()
 

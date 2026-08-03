@@ -8,16 +8,15 @@
 Python package for building panoramas from video with an extensible architecture.
 </p>
 
-<p align="center">
+<div align="center">
 
 ![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Coverage](https://img.shields.io/badge/coverage-92%25-brightgreen)
-![Code style](https://img.shields.io/badge/code%20style-ruff-black.svg)
+![Code style](https://img.shields.io/badge/code%20style-ruff-purple.svg)
 ![PyPI](https://img.shields.io/pypi/v/panoramator.svg)
-![Downloads](https://img.shields.io/pypi/dm/panoramator)
 
-</p>
+</div>
 
 <p align="center">
 OpenCV powered • Scene panoramas and object unwrap • Python CLI

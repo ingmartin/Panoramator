@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 
@@ -24,6 +25,14 @@ def _selected_frame(index: int) -> SelectedFrame:
     )
 
 
+def _stub_canvas(homographies: list[np.ndarray], width: int, height: int) -> Any:
+    return type(
+        "Canvas",
+        (),
+        {"width": width, "height": height, "offset_matrix": np.eye(3, dtype=np.float64), "global_homographies": homographies},
+    )()
+
+
 def test_build_result_reports_selected_and_validated_frames_separately(tmp_path: Path) -> None:
     config = PanoramaConfig(save_debug_artifacts=False, crop_result=False)
     builder = PanoramaBuilder(config)
@@ -41,15 +50,11 @@ def test_build_result_reports_selected_and_validated_frames_separately(tmp_path:
     metadata = VideoMetadata(path=Path("input.mp4"), fps=30.0, frame_count=3, width=4, height=4)
     panorama = np.zeros((4, 4, 3), dtype=np.uint8)
 
-    builder._read_metadata = lambda _: metadata
-    builder._build_best_chain = lambda _: chain_result
-    builder.canvas_builder.build = lambda frame_shapes, homographies: type(
-        "Canvas",
-        (),
-        {"width": 4, "height": 4, "offset_matrix": np.eye(3, dtype=np.float64), "global_homographies": homographies},
-    )()
-    builder.warper.warp = lambda frame, homography, canvas: (frame.image, np.ones((4, 4), dtype=np.uint8) * 255)
-    builder.blender.blend = lambda frames, masks, sharpnesses: panorama
+    cast(Any, builder)._read_metadata = lambda _: metadata
+    cast(Any, builder)._build_best_chain = lambda _: chain_result
+    cast(Any, builder.canvas_builder).build = lambda frame_shapes, homographies: _stub_canvas(homographies, 4, 4)
+    cast(Any, builder.warper).warp = lambda frame, homography, canvas: (frame.image, np.ones((4, 4), dtype=np.uint8) * 255)
+    cast(Any, builder.blender).blend = lambda frames, masks, sharpnesses: panorama
 
     result = builder.build_from_video("input.mp4", tmp_path / "out.png")
 
@@ -75,20 +80,16 @@ def test_debug_artifact_write_failure_does_not_abort_build(tmp_path: Path) -> No
     metadata = VideoMetadata(path=Path("input.mp4"), fps=30.0, frame_count=2, width=4, height=4)
     panorama = np.zeros((4, 4, 3), dtype=np.uint8)
 
-    builder._read_metadata = lambda _: metadata
-    builder._build_best_chain = lambda _: chain_result
-    builder.canvas_builder.build = lambda frame_shapes, homographies: type(
-        "Canvas",
-        (),
-        {"width": 4, "height": 4, "offset_matrix": np.eye(3, dtype=np.float64), "global_homographies": homographies},
-    )()
-    builder.warper.warp = lambda frame, homography, canvas: (frame.image, np.ones((4, 4), dtype=np.uint8) * 255)
-    builder.blender.blend = lambda frames, masks, sharpnesses: panorama
+    cast(Any, builder)._read_metadata = lambda _: metadata
+    cast(Any, builder)._build_best_chain = lambda _: chain_result
+    cast(Any, builder.canvas_builder).build = lambda frame_shapes, homographies: _stub_canvas(homographies, 4, 4)
+    cast(Any, builder.warper).warp = lambda frame, homography, canvas: (frame.image, np.ones((4, 4), dtype=np.uint8) * 255)
+    cast(Any, builder.blender).blend = lambda frames, masks, sharpnesses: panorama
 
     from panoramator.application import use_cases
 
     original_write_diagnostics = use_cases.write_diagnostics
-    use_cases.write_diagnostics = lambda output, effective_config, diagnostics: (_ for _ in ()).throw(OSError("disk full"))
+    cast(Any, use_cases).write_diagnostics = lambda output, effective_config, diagnostics: (_ for _ in ()).throw(OSError("disk full"))
     try:
         result = builder.build_from_video("input.mp4", tmp_path / "out.png")
     finally:
@@ -122,18 +123,15 @@ def test_photo_mode_crops_to_visible_area(tmp_path: Path) -> None:
     visible_mask = np.zeros((12, 12), dtype=np.uint8)
     visible_mask[1:11, 1:11] = 255
 
-    builder._read_metadata = lambda _: metadata
-    builder._build_best_chain = lambda _: chain_result
-    builder.canvas_builder.build = lambda frame_shapes, homographies: type(
-        "Canvas",
-        (),
-        {"width": 12, "height": 12, "offset_matrix": np.eye(3, dtype=np.float64), "global_homographies": homographies},
-    )()
-    builder.warper.warp = lambda frame, homography, canvas: (frame.image, visible_mask.copy())
-    builder.blender.blend = lambda frames, masks, sharpnesses: panorama
+    cast(Any, builder)._read_metadata = lambda _: metadata
+    cast(Any, builder)._build_best_chain = lambda _: chain_result
+    cast(Any, builder.canvas_builder).build = lambda frame_shapes, homographies: _stub_canvas(homographies, 12, 12)
+    cast(Any, builder.warper).warp = lambda frame, homography, canvas: (frame.image, visible_mask.copy())
+    cast(Any, builder.blender).blend = lambda frames, masks, sharpnesses: panorama
 
     result = builder.build_from_video("input.mp4", tmp_path / "out.png")
 
+    assert result.image is not None
     assert result.image.shape[:2] == (10, 10)
 
 
@@ -159,18 +157,15 @@ def test_photo_mode_preserves_black_objects_inside_visible_mask(tmp_path: Path) 
     visible_mask = np.zeros((12, 12), dtype=np.uint8)
     visible_mask[1:11, 1:11] = 255
 
-    builder._read_metadata = lambda _: metadata
-    builder._build_best_chain = lambda _: chain_result
-    builder.canvas_builder.build = lambda frame_shapes, homographies: type(
-        "Canvas",
-        (),
-        {"width": 12, "height": 12, "offset_matrix": np.eye(3, dtype=np.float64), "global_homographies": homographies},
-    )()
-    builder.warper.warp = lambda frame, homography, canvas: (frame.image, visible_mask.copy())
-    builder.blender.blend = lambda frames, masks, sharpnesses: panorama
+    cast(Any, builder)._read_metadata = lambda _: metadata
+    cast(Any, builder)._build_best_chain = lambda _: chain_result
+    cast(Any, builder.canvas_builder).build = lambda frame_shapes, homographies: _stub_canvas(homographies, 12, 12)
+    cast(Any, builder.warper).warp = lambda frame, homography, canvas: (frame.image, visible_mask.copy())
+    cast(Any, builder.blender).blend = lambda frames, masks, sharpnesses: panorama
 
     result = builder.build_from_video("input.mp4", tmp_path / "out.png")
 
+    assert result.image is not None
     assert result.image.shape[:2] == (10, 10)
     assert np.any(result.image == 0)
 
@@ -204,18 +199,15 @@ def test_build_applies_photometric_normalization_before_warp(tmp_path: Path) -> 
     metadata = VideoMetadata(path=Path("input.mp4"), fps=30.0, frame_count=2, width=4, height=4)
     warped_means: list[float] = []
 
-    builder._read_metadata = lambda _: metadata
-    builder._build_best_chain = lambda _: chain_result
-    builder.canvas_builder.build = lambda frame_shapes, homographies: type(
-        "Canvas",
-        (),
-        {"width": 4, "height": 4, "offset_matrix": np.eye(3, dtype=np.float64), "global_homographies": homographies},
-    )()
-    builder.warper.warp = lambda frame, homography, canvas: (
-        warped_means.append(float(frame.image.mean())) or frame.image,
-        np.ones((4, 4), dtype=np.uint8) * 255,
-    )
-    builder.blender.blend = lambda frames, masks, sharpnesses: frames[-1]
+    cast(Any, builder)._read_metadata = lambda _: metadata
+    cast(Any, builder)._build_best_chain = lambda _: chain_result
+    cast(Any, builder.canvas_builder).build = lambda frame_shapes, homographies: _stub_canvas(homographies, 4, 4)
+    def _warp(frame, homography, canvas):
+        warped_means.append(float(frame.image.mean()))
+        return frame.image, np.ones((4, 4), dtype=np.uint8) * 255
+
+    cast(Any, builder.warper).warp = _warp
+    cast(Any, builder.blender).blend = lambda frames, masks, sharpnesses: frames[-1]
 
     builder.build_from_video("input.mp4", tmp_path / "out.png")
 
@@ -243,18 +235,15 @@ def test_build_applies_final_sharpening(tmp_path: Path) -> None:
     panorama[4:12, 4:12] = 255
     panorama = np.clip((panorama.astype(np.float32) * 0.8), 0, 255).astype(np.uint8)
 
-    builder._read_metadata = lambda _: metadata
-    builder._build_best_chain = lambda _: chain_result
-    builder.canvas_builder.build = lambda frame_shapes, homographies: type(
-        "Canvas",
-        (),
-        {"width": 16, "height": 16, "offset_matrix": np.eye(3, dtype=np.float64), "global_homographies": homographies},
-    )()
-    builder.warper.warp = lambda frame, homography, canvas: (frame.image, np.ones((4, 4), dtype=np.uint8) * 255)
-    builder.blender.blend = lambda frames, masks, sharpnesses: panorama
+    cast(Any, builder)._read_metadata = lambda _: metadata
+    cast(Any, builder)._build_best_chain = lambda _: chain_result
+    cast(Any, builder.canvas_builder).build = lambda frame_shapes, homographies: _stub_canvas(homographies, 16, 16)
+    cast(Any, builder.warper).warp = lambda frame, homography, canvas: (frame.image, np.ones((4, 4), dtype=np.uint8) * 255)
+    cast(Any, builder.blender).blend = lambda frames, masks, sharpnesses: panorama
 
     result = builder.build_from_video("input.mp4", tmp_path / "out.png")
 
+    assert result.image is not None
     assert float(result.image.mean()) >= float(panorama.mean())
 
 
@@ -279,15 +268,15 @@ def test_build_can_fallback_to_window_alternate_when_geometry_fails(tmp_path: Pa
     from panoramator.application import use_cases
 
     original_create_feature_extractor = use_cases.create_feature_extractor
-    use_cases.create_feature_extractor = lambda backend_config: _Extractor()
-    builder.matcher.match = lambda left, right: MatchSet(raw_count=12, good_matches=[object()] * 10, confidence=0.8)
+    cast(Any, use_cases).create_feature_extractor = lambda backend_config: _Extractor()
+    cast(Any, builder.matcher).match = lambda left, right: MatchSet(raw_count=12, good_matches=[object()] * 10, confidence=0.8)
     outcomes = iter(
         [
             type("Geometry", (), {"homography": None, "inliers": 0, "reprojection_error": float("inf"), "valid": False, "reason": "not_enough_matches"})(),
             type("Geometry", (), {"homography": np.eye(3, dtype=np.float64), "inliers": 10, "reprojection_error": 1.0, "valid": True, "reason": "ok"})(),
         ]
     )
-    builder.geometry.estimate = lambda *args: next(outcomes)
+    cast(Any, builder.geometry).estimate = lambda *args: next(outcomes)
     try:
         chain = builder._build_chain(selected, [], config, "sift", [config.sampling_step])
     finally:

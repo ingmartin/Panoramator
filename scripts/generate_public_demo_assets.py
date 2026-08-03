@@ -6,7 +6,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-
 ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = ROOT / "docs" / "public-demo"
 
@@ -20,13 +19,18 @@ def _ensure_dir(path: Path) -> None:
 
 
 def _write_video(path: Path, frames: list[np.ndarray]) -> None:
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
     writer = cv2.VideoWriter(str(path), fourcc, FPS, (frames[0].shape[1], frames[0].shape[0]))
     if not writer.isOpened():
         raise RuntimeError(f"failed to open video writer for {path}")
     for frame in frames:
         writer.write(frame)
     writer.release()
+
+
+def _write_image(path: Path, image: np.ndarray) -> None:
+    if not cv2.imwrite(str(path), image):
+        raise RuntimeError(f"failed to write image: {path}")
 
 
 def _gradient_background(width: int, height: int, start: tuple[int, int, int], end: tuple[int, int, int]) -> np.ndarray:
@@ -65,15 +69,15 @@ def make_linear_demo() -> None:
 
     frames: list[np.ndarray] = []
     positions = np.linspace(0, canvas_w - FRAME_WIDTH, 42)
-    for i, x in enumerate(positions):
-        x0 = int(round(float(x)))
+    for i, position in enumerate(positions):
+        x0 = int(np.rint(position))
         frame = canvas[:, x0 : x0 + FRAME_WIDTH].copy()
         cv2.rectangle(frame, (0, 0), (FRAME_WIDTH - 1, FRAME_HEIGHT - 1), (255, 255, 255), 2)
         _draw_label(frame, f"build linear  {i+1:02d}", (12, 24), 0.55)
         frames.append(frame)
 
-    cv2.imwrite(str(OUT_DIR / "build-linear-reference.png"), canvas)
-    cv2.imwrite(str(OUT_DIR / "build-linear-preview.png"), frames[len(frames) // 2])
+    _write_image(OUT_DIR / "build-linear-reference.png", canvas)
+    _write_image(OUT_DIR / "build-linear-preview.png", frames[len(frames) // 2])
     _write_video(OUT_DIR / "build-linear-input.mp4", frames)
 
 
@@ -89,8 +93,8 @@ def make_rotation_demo() -> None:
 
     frames: list[np.ndarray] = []
     positions = np.linspace(0, strip_w - FRAME_WIDTH, 48)
-    for i, x in enumerate(positions):
-        x0 = int(round(float(x)))
+    for i, position in enumerate(positions):
+        x0 = int(np.rint(position))
         frame = strip[:, x0 : x0 + FRAME_WIDTH].copy()
         fade = np.tile(np.linspace(0.72, 1.0, FRAME_WIDTH, dtype=np.float32), (FRAME_HEIGHT, 1))
         frame = np.clip(frame.astype(np.float32) * fade[:, :, None], 0, 255).astype(np.uint8)
@@ -98,8 +102,8 @@ def make_rotation_demo() -> None:
         _draw_label(frame, f"build rotation  {i+1:02d}", (12, 24), 0.55)
         frames.append(frame)
 
-    cv2.imwrite(str(OUT_DIR / "build-rotation-reference.png"), strip)
-    cv2.imwrite(str(OUT_DIR / "build-rotation-preview.png"), frames[len(frames) // 2])
+    _write_image(OUT_DIR / "build-rotation-reference.png", strip)
+    _write_image(OUT_DIR / "build-rotation-preview.png", frames[len(frames) // 2])
     _write_video(OUT_DIR / "build-rotation-input.mp4", frames)
 
 
@@ -134,11 +138,11 @@ def make_unwrap_demo() -> None:
                 continue
             theta = math.asin(dx)
             u = ((theta + angle) / (2.0 * math.pi)) % 1.0
-            tex_x = min(texture_w - 1, max(0, int(round(u * (texture_w - 1)))))
+            tex_x = min(texture_w - 1, max(0, int(np.rint(u * (texture_w - 1)))))
             brightness = 0.35 + 0.65 * math.cos(theta) ** 1.5
             col = texture[:, tex_x].astype(np.float32) * brightness
-            top = int(round(cy - ry))
-            bottom = int(round(cy + ry))
+            top = int(np.rint(cy - ry))
+            bottom = int(np.rint(cy + ry))
             frame[top:bottom, x] = cv2.resize(col[:, None, :], (1, bottom - top), interpolation=cv2.INTER_LINEAR)[:, 0, :]
 
         cv2.ellipse(frame, (cx, cy), (int(rx), int(ry)), 0, 0, 360, (40, 40, 40), 2)
@@ -147,8 +151,8 @@ def make_unwrap_demo() -> None:
         _draw_label(frame, f"unwrap cylinder  {i+1:02d}", (12, 24), 0.55)
         frames.append(frame)
 
-    cv2.imwrite(str(OUT_DIR / "unwrap-cylinder-reference.png"), texture)
-    cv2.imwrite(str(OUT_DIR / "unwrap-cylinder-preview.png"), frames[len(frames) // 2])
+    _write_image(OUT_DIR / "unwrap-cylinder-reference.png", texture)
+    _write_image(OUT_DIR / "unwrap-cylinder-preview.png", frames[len(frames) // 2])
     _write_video(OUT_DIR / "unwrap-cylinder-input.mp4", frames)
 
 
@@ -169,7 +173,7 @@ def make_overview() -> None:
 
     gap = np.full((tiles[0].shape[0], 18, 3), 255, dtype=np.uint8)
     overview = np.concatenate([tiles[0], gap, tiles[1], gap, tiles[2]], axis=1)
-    cv2.imwrite(str(OUT_DIR / "overview.png"), overview)
+    _write_image(OUT_DIR / "overview.png", overview)
 
 
 def main() -> None:

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import numpy as np
 import pytest
 
@@ -11,8 +9,8 @@ from panoramator.features import extractors
 
 
 def test_create_feature_extractor_rejects_unknown_backend() -> None:
-    with pytest.raises(ValueError, match="Unsupported feature backend"):
-        extractors.create_feature_extractor(SimpleNamespace(feature_backend="orbish"))
+    with pytest.raises(ValueError, match="feature_backend must be one of"):
+        extractors.create_feature_extractor(PanoramaConfig(feature_backend="orbish"))  # type: ignore[arg-type]
 
 
 def test_orb_extractor_uses_feature_image_and_rescales_keypoints(monkeypatch) -> None:
@@ -33,6 +31,7 @@ def test_orb_extractor_uses_feature_image_and_rescales_keypoints(monkeypatch) ->
     features = extractors.ORBFeatureExtractor(PanoramaConfig(max_features=123)).extract(frame)
 
     assert features.backend == "orb"
+    assert features.descriptors is not None
     assert features.descriptors.shape == (1, 3)
     assert features.keypoints[0].pt == (2.0, 4.0)
 

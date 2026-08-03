@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 import numpy as np
 
 from panoramator.config.models import PanoramaConfig
@@ -45,7 +47,7 @@ class _FakeCapture:
 def test_iter_frames_falls_back_when_frame_count_is_unavailable() -> None:
     config = PanoramaConfig(sampling_step=2, max_frames=2)
     source = OpenCVVideoSource("dummy.mp4", config)
-    source.capture = _FakeCapture([np.zeros((4, 4, 3), dtype=np.uint8) for _ in range(6)])
+    cast(Any, source).capture = _FakeCapture([np.zeros((4, 4, 3), dtype=np.uint8) for _ in range(6)])
 
     frames = source.iter_frames()
 
