@@ -55,6 +55,102 @@ def _draw_label(img: np.ndarray, text: str, origin: tuple[int, int], scale: floa
     )
 
 
+def _apply_vignette(frame: np.ndarray, strength: float = 0.2) -> np.ndarray:
+    yy, xx = np.indices((frame.shape[0], frame.shape[1]), dtype=np.float32)
+    cx = (frame.shape[1] - 1) / 2.0
+    cy = (frame.shape[0] - 1) / 2.0
+    dx = (xx - cx) / max(cx, 1.0)
+    dy = (yy - cy) / max(cy, 1.0)
+    radius = np.sqrt(dx * dx + dy * dy)
+    vignette = 1.0 - strength * np.clip(radius, 0.0, 1.0) ** 1.7
+    return np.clip(frame.astype(np.float32) * vignette[:, :, None], 0, 255).astype(np.uint8)
+
+
+def _apply_edge_warp(frame: np.ndarray, phase: float) -> np.ndarray:
+    height, width = frame.shape[:2]
+    yy, xx = np.indices((height, width), dtype=np.float32)
+    x_norm = (xx / max(width - 1, 1)) * 2.0 - 1.0
+    y_norm = (yy / max(height - 1, 1)) * 2.0 - 1.0
+    bow = 12.0 * np.sin(phase * 2.0 * math.pi) * (x_norm**2) * (1.0 - 0.25 * y_norm**2)
+    squeeze = 8.0 * np.cos(phase * 2.0 * math.pi) * y_norm * np.abs(x_norm)
+    map_x = (xx + bow).astype(np.float32)
+    map_y = (yy + squeeze).astype(np.float32)
+    return cv2.remap(
+        frame,
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REFLECT101,
+    )
+
+
+def _apply_scanlines(frame: np.ndarray, strength: float = 0.12) -> np.ndarray:
+    frame_f = frame.astype(np.float32)
+    rows = np.arange(frame.shape[0], dtype=np.float32)
+    band = 1.0 - strength * (0.5 + 0.5 * np.sin(rows * 0.42))
+    return np.clip(frame_f * band[:, None, None], 0, 255).astype(np.uint8)
+
+
+def _stylize_rotation_reference(strip: np.ndarray) -> np.ndarray:
+    height, width = strip.shape[:2]
+    yy, xx = np.indices((height, width), dtype=np.float32)
+    x_norm = (xx / max(width - 1, 1)) * 2.0 - 1.0
+    y_norm = (yy / max(height - 1, 1)) * 2.0 - 1.0
+    wave_y = 9.0 * np.sin((x_norm + 1.0) * math.pi * 2.6) * (0.35 + 0.65 * (1.0 - y_norm**2))
+    wave_x = 10.0 * np.sin(y_norm * math.pi * 0.9) * (x_norm**2)
+    map_x = (xx + wave_x).astype(np.float32)
+    map_y = (yy + wave_y).astype(np.float32)
+    warped = cv2.remap(
+        strip,
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REFLECT101,
+    )
+
+    light = 0.88 + 0.18 * np.cos((x_norm + 0.15) * math.pi)
+    warped = np.clip(warped.astype(np.float32) * light[:, :, None], 0, 255).astype(np.uint8)
+    warped = _apply_scanlines(warped, 0.08)
+    cv2.putText(
+        warped,
+        "synthetic cylindrical result",
+        (width - 420, height - 16),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+    return warped
+
+
+def _render_rotation_frame(strip: np.ndarray, phase: float, index: int) -> np.ndarray:
+    strip_w = strip.shape[1]
+    eased = 0.5 - 0.5 * math.cos(math.pi * phase)
+    center = eased * (strip_w - FRAME_WIDTH)
+    zoom = 1.0 + 0.22 * math.sin(phase * 2.0 * math.pi) ** 2
+    crop_w = max(FRAME_WIDTH, min(strip_w, int(np.rint(FRAME_WIDTH / zoom))))
+    x0 = int(np.clip(np.rint(center), 0, strip_w - crop_w))
+    view = strip[:, x0 : x0 + crop_w].copy()
+    frame = cv2.resize(view, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_LINEAR)
+    frame = _apply_edge_warp(frame, phase)
+    frame = _apply_vignette(frame, 0.34)
+    frame = _apply_scanlines(frame, 0.1)
+
+    fade = np.tile(np.linspace(0.72, 1.0, FRAME_WIDTH, dtype=np.float32), (FRAME_HEIGHT, 1))
+    exposure = 0.9 + 0.16 * math.sin(phase * 2.0 * math.pi - 0.5)
+    frame = np.clip(frame.astype(np.float32) * fade[:, :, None] * exposure, 0, 255).astype(np.uint8)
+
+    blur_kernel = 3 + 2 * int((math.sin(phase * 2.0 * math.pi) + 1.0) > 1.6)
+    if blur_kernel > 3:
+        frame = cv2.GaussianBlur(frame, (blur_kernel, blur_kernel), 0.0)
+
+    cv2.rectangle(frame, (0, 0), (FRAME_WIDTH - 1, FRAME_HEIGHT - 1), (255, 255, 255), 2)
+    _draw_label(frame, f"build rotation  {index+1:02d}", (12, 24), 0.55)
+    _draw_label(frame, f"yaw {(-42.0 + 84.0 * eased):+05.1f} deg", (12, 204), 0.5)
+    return frame
+
+
 def make_linear_demo() -> None:
     canvas_w = 1200
     canvas_h = FRAME_HEIGHT
@@ -89,20 +185,21 @@ def make_rotation_demo() -> None:
         x = 20 + idx * 105
         cv2.ellipse(strip, (x + 40, 110), (42, 72), 0, 0, 360, (240, 240 - idx * 8, 80 + idx * 7), -1)
         _draw_label(strip, f"R{idx+1}", (x + 8, 115), 0.6)
+        top = 22 + (idx % 3) * 8
+        cv2.line(strip, (x + 16, top), (x + 64, top), (255, 255, 255), 2)
+        cv2.line(strip, (x + 40, 28), (x + 40, 190), (18, 18, 18), 1)
+    for idx in range(7):
+        x = 70 + idx * 210
+        cv2.rectangle(strip, (x, 44), (x + 26, 176), (245, 245, 245), 2)
+        cv2.circle(strip, (x + 13, 84), 8, (70, 200, 255), -1)
     _draw_label(strip, "ROTATION DEMO", (24, 28), 0.9)
 
     frames: list[np.ndarray] = []
-    positions = np.linspace(0, strip_w - FRAME_WIDTH, 48)
-    for i, position in enumerate(positions):
-        x0 = int(np.rint(position))
-        frame = strip[:, x0 : x0 + FRAME_WIDTH].copy()
-        fade = np.tile(np.linspace(0.72, 1.0, FRAME_WIDTH, dtype=np.float32), (FRAME_HEIGHT, 1))
-        frame = np.clip(frame.astype(np.float32) * fade[:, :, None], 0, 255).astype(np.uint8)
-        cv2.rectangle(frame, (0, 0), (FRAME_WIDTH - 1, FRAME_HEIGHT - 1), (255, 255, 255), 2)
-        _draw_label(frame, f"build rotation  {i+1:02d}", (12, 24), 0.55)
-        frames.append(frame)
+    phases = np.linspace(0.0, 1.0, 48)
+    for i, phase in enumerate(phases):
+        frames.append(_render_rotation_frame(strip, float(phase), i))
 
-    _write_image(OUT_DIR / "build-rotation-reference.png", strip)
+    _write_image(OUT_DIR / "build-rotation-reference.png", _stylize_rotation_reference(strip))
     _write_image(OUT_DIR / "build-rotation-preview.png", frames[len(frames) // 2])
     _write_video(OUT_DIR / "build-rotation-input.mp4", frames)
 
