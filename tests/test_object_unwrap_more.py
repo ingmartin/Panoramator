@@ -43,7 +43,11 @@ from panoramator.object_unwrap.segmentation import (
     publish_surface_mask,
     stable_surface_bbox,
 )
-from panoramator.object_unwrap.service import ObjectUnwrapper
+from panoramator.object_unwrap.service import (
+    ObjectUnwrapper,
+    _PublicationDecision,
+    _SurfaceBuild,
+)
 
 
 def _analyzed_frame(index: int = 0) -> AnalyzedFrame:
@@ -724,6 +728,153 @@ def test_unwrapper_returns_unstable_geometry_without_planar_fallback(monkeypatch
     assert result.output_path is None
 
 
+def test_decide_publication_uses_planar_fallback_without_file_output() -> None:
+    analysis = Analysis([_analyzed_frame(0), _analyzed_frame(1), _analyzed_frame(2)], SurfaceKind.CYLINDRICAL)
+    planar = np.full((5, 7, 3), 90, np.uint8)
+    planar_coverage = np.full((5, 7), 255, np.uint8)
+    build = _SurfaceBuild(
+        image=np.full((6, 8, 3), 140, np.uint8),
+        coverage=np.full((6, 8), 255, np.uint8),
+        model=SurfaceModel(SurfaceKind.CYLINDRICAL),
+        measurements={
+            "surface_coverage_fraction": 1.0,
+            "pose_residual_radians": 0.5,
+            "accepted_pose_pairs": 0,
+            "quality_gate_passed": 1,
+            "rectification_applied": 0,
+        },
+        artifacts={"mosaic": planar, "mosaic_coverage": planar_coverage},
+        fallback_used=False,
+    )
+
+    decision = ObjectUnwrapper(UnwrapConfig(allow_partial=True))._decide_publication(analysis, build)
+
+    assert decision.status is UnwrapStatus.PARTIAL_SURFACE
+    assert decision.message.startswith("A connected image-space mosaic is available")
+    assert np.array_equal(decision.image, planar)
+    assert np.array_equal(decision.coverage, planar_coverage)
+
+
+def test_build_surface_uses_curved_fallback_and_analysis_measurements(monkeypatch: pytest.MonkeyPatch) -> None:
+    analysis = Analysis(
+        [_analyzed_frame(0), _analyzed_frame(1)],
+        SurfaceKind.CURVED,
+        measurements={"analysis_score": 7},
+    )
+    image = np.full((5, 7, 3), 90, np.uint8)
+    coverage = np.full((5, 7), 255, np.uint8)
+    monkeypatch.setattr(
+        CurvedSurfaceFallbackBuilder,
+        "build",
+        lambda self, frames, config: (
+            image,
+            coverage,
+            SurfaceModel(SurfaceKind.CURVED),
+            {},
+            {"artifact": "ok"},
+        ),
+    )
+
+    build = ObjectUnwrapper(UnwrapConfig())._build_surface(analysis)
+
+    assert build.fallback_used is True
+    assert build.measurements["surface_coverage_fraction"] == 1.0
+    assert build.measurements["analysis_score"] == 7
+    assert build.measurements["frame_count"] == 2
+
+
+def test_decide_publication_prefers_rectified_partial_when_geometry_is_rejected() -> None:
+    analysis = Analysis([_analyzed_frame(0), _analyzed_frame(1), _analyzed_frame(2)], SurfaceKind.CYLINDRICAL)
+    build = _SurfaceBuild(
+        image=np.full((6, 8, 3), 140, np.uint8),
+        coverage=np.full((6, 8), 255, np.uint8),
+        model=SurfaceModel(SurfaceKind.CYLINDRICAL),
+        measurements={
+            "surface_coverage_fraction": 1.0,
+            "pose_residual_radians": 0.5,
+            "accepted_pose_pairs": 0,
+            "quality_gate_passed": 1,
+            "rectification_applied": 1,
+        },
+        artifacts={},
+        fallback_used=False,
+    )
+
+    decision = ObjectUnwrapper(UnwrapConfig(allow_partial=True))._decide_publication(analysis, build)
+
+    assert decision.status is UnwrapStatus.PARTIAL_SURFACE
+    assert decision.message.startswith("A rectified observed band is available")
+
+
+def test_decide_publication_returns_quality_gate_message_when_geometry_is_ok() -> None:
+    analysis = Analysis([_analyzed_frame(0), _analyzed_frame(1), _analyzed_frame(2)], SurfaceKind.CYLINDRICAL)
+    build = _SurfaceBuild(
+        image=np.full((6, 8, 3), 140, np.uint8),
+        coverage=np.full((6, 8), 255, np.uint8),
+        model=SurfaceModel(SurfaceKind.CYLINDRICAL),
+        measurements={
+            "surface_coverage_fraction": 1.0,
+            "pose_residual_radians": 0.01,
+            "accepted_pose_pairs": 2,
+            "quality_gate_passed": 0,
+            "rectification_applied": 0,
+        },
+        artifacts={},
+        fallback_used=False,
+    )
+
+    decision = ObjectUnwrapper(UnwrapConfig(allow_partial=True))._decide_publication(analysis, build)
+
+    assert decision.status is UnwrapStatus.PARTIAL_SURFACE
+    assert decision.message.startswith("The baseline mosaic was published without rectification")
+
+
+def test_decide_publication_returns_fallback_message_for_curved_surface_build() -> None:
+    analysis = Analysis([_analyzed_frame(0), _analyzed_frame(1), _analyzed_frame(2)], SurfaceKind.CURVED)
+    build = _SurfaceBuild(
+        image=np.full((6, 8, 3), 140, np.uint8),
+        coverage=np.full((6, 8), 255, np.uint8),
+        model=SurfaceModel(SurfaceKind.CURVED),
+        measurements={
+            "surface_coverage_fraction": 1.0,
+            "pose_residual_radians": 0.01,
+            "accepted_pose_pairs": 2,
+            "quality_gate_passed": 1,
+            "rectification_applied": 0,
+        },
+        artifacts={},
+        fallback_used=True,
+    )
+
+    decision = ObjectUnwrapper(UnwrapConfig(allow_partial=True))._decide_publication(analysis, build)
+
+    assert decision.status is UnwrapStatus.PARTIAL_SURFACE
+    assert decision.message.startswith("Only the observed side band is available")
+
+
+def test_decide_publication_returns_non_rectified_partial_message() -> None:
+    analysis = Analysis([_analyzed_frame(0), _analyzed_frame(1), _analyzed_frame(2)], SurfaceKind.CYLINDRICAL)
+    build = _SurfaceBuild(
+        image=np.full((6, 8, 3), 140, np.uint8),
+        coverage=np.full((6, 8), 255, np.uint8),
+        model=SurfaceModel(SurfaceKind.CYLINDRICAL),
+        measurements={
+            "surface_coverage_fraction": 1.0,
+            "pose_residual_radians": 0.01,
+            "accepted_pose_pairs": 2,
+            "quality_gate_passed": 1,
+            "rectification_applied": 0,
+        },
+        artifacts={},
+        fallback_used=False,
+    )
+
+    decision = ObjectUnwrapper(UnwrapConfig(allow_partial=True))._decide_publication(analysis, build)
+
+    assert decision.status is UnwrapStatus.PARTIAL_SURFACE
+    assert decision.message.startswith("A partial observed surface band was assembled, but the mosaic did not support")
+
+
 def test_unwrapper_returns_partial_without_output_when_partial_results_are_disabled(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
@@ -926,6 +1077,74 @@ def test_unwrapper_photo_mode_crops_to_visible_area(monkeypatch: pytest.MonkeyPa
     assert saved.shape[:2] == (4, 6)
     assert result.diagnostics.measurements["photo_mode_applied"] == 1
     assert result.diagnostics.measurements["photo_mode_crop_policy"] == "inscribed_rectangle"
+
+
+def test_render_publishable_surface_applies_photo_mode_and_alpha_without_writing() -> None:
+    coverage = np.zeros((6, 10), np.uint8)
+    coverage[1:5, 2:8] = 255
+    measurements: dict[str, float | int | str | list[float] | list[int]] = {}
+    decision = _PublicationDecision(
+        status=UnwrapStatus.PARTIAL_SURFACE,
+        message="partial",
+        recommendation="retry",
+        image=np.full((6, 10, 3), 120, np.uint8),
+        coverage=coverage,
+    )
+
+    bgra, rendered_coverage = ObjectUnwrapper(
+        UnwrapConfig(allow_partial=True, photo_mode=True, photo_crop_margin_px=0)
+    )._render_publishable_surface(decision, measurements)
+
+    assert bgra.shape[:2] == (4, 6)
+    assert np.array_equal(rendered_coverage, bgra[:, :, 3])
+    assert measurements["photo_mode_applied"] == 1
+
+
+def test_apply_photo_mode_marks_ineligible_status_without_cropping() -> None:
+    bgra = np.zeros((4, 4, 4), np.uint8)
+    coverage = np.ones((4, 4), np.uint8) * 255
+    measurements: dict[str, float | int | str | list[float] | list[int]] = {}
+
+    cropped, cropped_coverage = ObjectUnwrapper(UnwrapConfig(photo_mode=True))._apply_photo_mode(
+        UnwrapStatus.UNSTABLE_CAMERA_GEOMETRY,
+        bgra,
+        coverage,
+        measurements,
+    )
+
+    assert np.array_equal(cropped, bgra)
+    assert np.array_equal(cropped_coverage, coverage)
+    assert measurements["photo_mode_applied"] == 0
+    assert measurements["photo_mode_crop_policy"] == "skipped_ineligible"
+
+
+def test_apply_result_crop_skips_when_disabled() -> None:
+    bgra = np.zeros((4, 4, 4), np.uint8)
+    coverage = np.ones((4, 4), np.uint8) * 255
+    measurements: dict[str, float | int | str | list[float] | list[int]] = {}
+
+    cropped, cropped_coverage = ObjectUnwrapper(UnwrapConfig(crop_result=False))._apply_result_crop(
+        bgra,
+        coverage,
+        measurements,
+    )
+
+    assert np.array_equal(cropped, bgra)
+    assert np.array_equal(cropped_coverage, coverage)
+    assert measurements == {}
+
+
+def test_write_publishable_surface_validates_suffix_and_imwrite_failure(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    unwrapper = ObjectUnwrapper(UnwrapConfig())
+    bgra = np.zeros((4, 4, 4), np.uint8)
+
+    with pytest.raises(ValueError, match="must support alpha"):
+        unwrapper._write_publishable_surface(tmp_path / "out.jpg", bgra)
+
+    monkeypatch.setattr(cv2, "imwrite", lambda path, image: False)
+
+    with pytest.raises(RuntimeError, match="Failed to write unwrap image"):
+        unwrapper._write_publishable_surface(tmp_path / "out.png", bgra)
 
 
 def test_unwrapper_photo_mode_applies_to_planar_fallback_when_crop_is_safe(

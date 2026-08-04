@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 import panoramator.io.video as video_module
+from panoramator.cli import about as cli_about
+from panoramator.cli import commands as cli_commands
 from panoramator.cli import main as cli_main
 from panoramator.config.models import PanoramaConfig
 from panoramator.domain.models import PanoramaDiagnostics, PanoramaResult, VideoMetadata
@@ -37,18 +39,31 @@ def _build_args(**overrides) -> argparse.Namespace:
         "blur_rescue_sharpen_sigma": None,
         "frame_selection_window_size": None,
         "motion_model": None,
+        "capture_mode": None,
+        "projection": None,
+        "focal_length_px": None,
+        "horizontal_fov_degrees": None,
         "feather_blend_kernel": None,
         "seam_blur_kernel": None,
         "seam_band_width": None,
         "photometric_normalization": False,
         "no_photometric_normalization": False,
+        "global_photometric_normalization": False,
+        "no_global_photometric_normalization": False,
         "photometric_smoothing": None,
         "overlap_sharpness_weight": None,
+        "rotation_min_baseline_px": None,
+        "rotation_min_new_coverage_ratio": None,
+        "photometric_gain_limit": None,
+        "photometric_offset_limit": None,
         "narrow_gap_fill": False,
         "no_narrow_gap_fill": False,
         "max_narrow_gap_width": None,
         "photo_crop_margin_px": None,
         "photo_mode": False,
+        "crop_policy": None,
+        "max_inscribed_crop_loss": None,
+        "max_inscribed_crop_width_loss": None,
         "final_sharpening": False,
         "no_final_sharpening": False,
         "final_sharpen_strength": None,
@@ -426,7 +441,7 @@ def test_create_parser_routes_supported_subcommands() -> None:
     assert export_args.func is cli_main.export_config_command
 
 
-def test_format_root_help_includes_examples_and_build_unwrap_options() -> None:
+def test_format_root_help_includes_examples_and_command_help_hints() -> None:
     parser = cli_main.create_parser()
 
     help_text = cli_main.format_root_help(parser)
@@ -434,23 +449,28 @@ def test_format_root_help_includes_examples_and_build_unwrap_options() -> None:
     assert "Examples:" in help_text
     assert "panoramator build video.mp4 output.png" in help_text
     assert "panoramator unwrap video.mp4 surface.png --surface auto --allow-partial" in help_text
-    assert "Build command:" in help_text
-    assert "Unwrap command:" in help_text
-    assert "--capture-mode" in help_text
-    assert "--publish-profile" in help_text
+    assert "Command help:" in help_text
+    assert "panoramator build -h" in help_text
+    assert "panoramator unwrap -h" in help_text
+    assert "panoramator inspect-video -h" in help_text
+    assert "panoramator export-config -h" in help_text
+    assert "Build command:" not in help_text
+    assert "Unwrap command:" not in help_text
+    assert "Primary feature detector and descriptor backend" not in help_text
+    assert "Severe mosaic seam error threshold in pixels" not in help_text
 
 
 def test_format_version_screen_includes_runtime_summary(monkeypatch) -> None:
-    monkeypatch.setattr(cli_main, "_read_ascii_logo", lambda: "LOGO")
-    monkeypatch.setattr(cli_main, "_get_package_version", lambda: "0.3.2")
-    monkeypatch.setattr(cli_main.cv2, "__version__", "5.0.0")
-    monkeypatch.setattr(cli_main.cv2, "getNumThreads", lambda: 16)
-    monkeypatch.setattr(cli_main, "_detect_backend", lambda: "CUDA")
+    monkeypatch.setattr(cli_about, "read_ascii_logo", lambda: "LOGO")
+    monkeypatch.setattr(cli_about, "get_package_version", lambda: "0.3.3")
+    monkeypatch.setattr(cli_about.cv2, "__version__", "5.0.0")
+    monkeypatch.setattr(cli_about.cv2, "getNumThreads", lambda: 16)
+    monkeypatch.setattr(cli_about, "detect_backend", lambda: "CUDA")
 
     screen = cli_main.format_version_screen()
 
     assert "LOGO" in screen
-    assert "Panoramator v0.3.2" in screen
+    assert "Panoramator v0.3.3" in screen
     assert "OpenCV      5.0" in screen
     assert "Backend     CUDA" in screen
     assert "Threads     16" in screen
@@ -459,18 +479,110 @@ def test_format_version_screen_includes_runtime_summary(monkeypatch) -> None:
 
 
 def test_get_package_version_prefers_pyproject_when_available(monkeypatch) -> None:
-    monkeypatch.setattr(cli_main.importlib.metadata, "version", lambda _: "0.2.0")
-    monkeypatch.setattr(cli_main, "_get_pyproject_version", lambda: "0.3.2")
+    monkeypatch.setattr(cli_about.importlib.metadata, "version", lambda _: "0.2.0")
+    monkeypatch.setattr(cli_about, "get_pyproject_version", lambda: "0.3.3")
+    monkeypatch.setattr(cli_about, "is_running_from_source_tree", lambda: True)
 
-    assert cli_main._get_package_version() == "0.3.2"
+    assert cli_about.get_package_version() == "0.3.3"
 
 
 def test_get_pyproject_version_reads_project_version(tmp_path, monkeypatch) -> None:
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text('[project]\nversion = "1.2.3"\n', encoding="utf-8")
-    monkeypatch.setattr(cli_main, "ROOT_DIR", tmp_path)
+    monkeypatch.setattr(cli_about, "ROOT_DIR", tmp_path)
 
-    assert cli_main._get_pyproject_version() == "1.2.3"
+    assert cli_about.get_pyproject_version() == "1.2.3"
+
+
+def test_get_package_version_prefers_installed_metadata_outside_source_tree(monkeypatch) -> None:
+    monkeypatch.setattr(cli_about.importlib.metadata, "version", lambda _: "9.9.9")
+    monkeypatch.setattr(cli_about, "get_pyproject_version", lambda: "0.3.3")
+    monkeypatch.setattr(cli_about, "is_running_from_source_tree", lambda: False)
+
+    assert cli_about.get_package_version() == "9.9.9"
+
+
+def test_get_package_version_falls_back_to_pyproject_when_metadata_is_missing(monkeypatch) -> None:
+    def _raise_missing(_: str) -> str:
+        raise cli_about.importlib.metadata.PackageNotFoundError
+
+    monkeypatch.setattr(cli_about.importlib.metadata, "version", _raise_missing)
+    monkeypatch.setattr(cli_about, "get_pyproject_version", lambda: "0.3.3")
+    monkeypatch.setattr(cli_about, "is_running_from_source_tree", lambda: False)
+
+    assert cli_about.get_package_version() == "0.3.3"
+
+
+def test_read_ascii_logo_and_fallback(tmp_path, monkeypatch) -> None:
+    logo = tmp_path / "ascii.txt"
+    logo.write_text("PAN\n", encoding="utf-8")
+    monkeypatch.setattr(cli_about, "ASCII_LOGO_PATH", logo)
+
+    assert cli_about.read_ascii_logo() == "PAN"
+
+    logo.unlink()
+
+    assert cli_about.read_ascii_logo() == "Panoramator"
+
+
+def test_get_pyproject_version_returns_default_when_file_or_version_is_missing(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(cli_about, "ROOT_DIR", tmp_path)
+    assert cli_about.get_pyproject_version() == "0.0.0"
+
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'panoramator'\n", encoding="utf-8")
+    assert cli_about.get_pyproject_version() == "0.0.0"
+
+
+def test_detect_backend_and_helpers_cover_cpu_fallback_paths(monkeypatch) -> None:
+    class _CudaProxy:
+        @staticmethod
+        def getCudaEnabledDeviceCount() -> int:
+            raise AttributeError("cuda unavailable")
+
+    monkeypatch.setattr(cli_about.cv2, "cuda", _CudaProxy)
+
+    assert cli_about.detect_backend() == "CPU"
+    assert cli_about.format_label("coverage_first") == "Coverage First"
+    assert cli_about.format_opencv_version("5") == "5"
+    assert cli_about.compose_columns(["A", "B"], ["1"]) == "A    1\nB"
+
+
+def test_argument_spec_uses_positional_dest_and_apply_build_overrides_respects_flags() -> None:
+    positional = cli_commands.ArgumentSpec(("video_path",), {"help": "Input"})
+    assert positional.dest == "video_path"
+
+    config = PanoramaConfig(enable_sampling_fallback=True, save_debug_artifacts=True)
+    args = _build_args(
+        feature_backend="sift",
+        no_sampling_fallback=True,
+        save_debug_artifacts=False,
+        no_save_debug_artifacts=True,
+    )
+
+    cli_commands.apply_build_overrides(config, args)
+
+    assert config.feature_backend == "sift"
+    assert config.enable_sampling_fallback is False
+    assert config.save_debug_artifacts is False
+
+
+def test_apply_unwrap_overrides_maps_enum_and_boolean_values() -> None:
+    config = UnwrapConfig()
+    args = _unwrap_args(
+        surface_kind="curved",
+        publish_profile="coverage_first",
+        allow_partial=True,
+        no_temporal_decimation=True,
+        no_global_pose_optimization=True,
+    )
+
+    cli_commands.apply_unwrap_overrides(config, args)
+
+    assert config.surface_kind is SurfaceKind.CURVED
+    assert config.publish_profile is PublishProfile.COVERAGE_FIRST
+    assert config.allow_partial is True
+    assert config.enable_temporal_decimation is False
+    assert config.enable_global_pose_optimization is False
 
 
 def test_main_dispatches_selected_command(monkeypatch) -> None:
@@ -493,8 +605,11 @@ def test_main_prints_root_help_without_command(monkeypatch, capsys) -> None:
     assert cli_main.main() == 0
     output = capsys.readouterr().out
     assert "Examples:" in output
-    assert "Build command:" in output
-    assert "Unwrap command:" in output
+    assert "Command help:" in output
+    assert "panoramator build -h" in output
+    assert "panoramator unwrap -h" in output
+    assert "Build command:" not in output
+    assert "Unwrap command:" not in output
 
 
 def test_main_prints_version_screen(monkeypatch, capsys) -> None:

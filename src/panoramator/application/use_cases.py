@@ -15,6 +15,7 @@ from panoramator.config.models import PanoramaConfig
 from panoramator.diagnostics.reporting import write_diagnostics
 from panoramator.domain.interfaces import FeatureExtractor
 from panoramator.domain.models import (
+    CanvasModel,
     FeatureSet,
     Frame,
     PairGeometry,
@@ -31,7 +32,7 @@ from panoramator.geometry.homography import (
 from panoramator.geometry.trajectory import stabilize_rotation_trajectory
 from panoramator.io.video import OpenCVVideoSource
 from panoramator.matching.matchers import BFMatcherAdapter
-from panoramator.motion_analysis.analyzer import MotionAnalyzer
+from panoramator.motion_analysis.analyzer import MotionAnalysis, MotionAnalyzer
 from panoramator.postprocess.crop import crop_with_policy
 from panoramator.postprocess.enhance import (
     apply_final_sharpening,
@@ -41,7 +42,7 @@ from panoramator.postprocess.gaps import fill_narrow_mask_gaps
 from panoramator.projection.models import Projection, create_projection
 from panoramator.projection.preprocess import project_frame_for_geometry
 from panoramator.selection.selector import FrameSelector
-from panoramator.strategy.resolver import resolve_strategy
+from panoramator.strategy.resolver import BuildDecision, resolve_strategy
 from panoramator.warping.warper import FrameWarper
 
 LOGGER = logging.getLogger(__name__)
@@ -60,6 +61,28 @@ class _ChainBuildResult:
     pair_metrics: list[dict[str, object]]
 
 
+@dataclass(slots=True)
+class _BuildExecution:
+    metadata: VideoMetadata
+    chain_result: _ChainBuildResult
+    decision: BuildDecision
+    analysis: MotionAnalysis
+    orbit_status: str
+    normalized_frames: list[SelectedFrame]
+    global_homographies: list[np.ndarray]
+    trajectory: dict[str, list[float]]
+    keyframe_metrics: list[dict[str, float | str]]
+
+
+@dataclass(slots=True)
+class _RenderedPanorama:
+    image: np.ndarray
+    crop_policy: str
+    crop_loss: float
+    crop_before_size: tuple[int, int]
+    gap_fill_metrics: dict[str, float]
+
+
 class PanoramaBuilder:
     def __init__(self, config: PanoramaConfig | None = None) -> None:
         self.config = config or PanoramaConfig()
@@ -72,6 +95,27 @@ class PanoramaBuilder:
         self.motion_analyzer = MotionAnalyzer()
 
     def build_from_video(self, video_path: str | Path, output_path: str | Path) -> PanoramaResult:
+        execution = self._prepare_build(video_path)
+        if execution.orbit_status == "orbit_not_supported_reliably":
+            diagnostics = self._build_orbit_rejection_diagnostics(execution)
+            self._write_debug_diagnostics(Path(output_path), self.config, diagnostics)
+            return PanoramaResult(image=None, metadata=execution.metadata, diagnostics=diagnostics)
+
+        rendered = self._render_panorama(execution, output_path)
+        output = self._write_panorama_image(output_path, rendered.image)
+        diagnostics = self._build_success_diagnostics(execution, rendered, output)
+        self._write_debug_diagnostics(
+            output,
+            replace(
+                self.config,
+                feature_backend=execution.chain_result.backend,
+                sampling_step=execution.chain_result.sampling_step,
+            ),
+            diagnostics,
+        )
+        return PanoramaResult(image=rendered.image, metadata=execution.metadata, diagnostics=diagnostics)
+
+    def _prepare_build(self, video_path: str | Path) -> _BuildExecution:
         metadata = self._read_metadata(video_path)
         chain_result = self._build_best_chain(video_path)
         if len(chain_result.selected_frames) < 2:
@@ -96,31 +140,11 @@ class PanoramaBuilder:
             # These transforms were estimated in cylindrical local coordinates,
             # which is required by the final curved renderer.
             chain_result = cylindrical_preview
+
         keyframe_metrics: list[dict[str, float | str]] = []
         if decision.capture_mode == "rotation":
             chain_result, keyframe_metrics = self._decimate_rotation_chain(chain_result)
-        normalized_frames = normalize_selected_frames(chain_result.filtered_frames, self.config)
-        frame_shapes = [item.frame.image.shape[:2] for item in normalized_frames]
-        orbit_status = self._orbit_status(decision.capture_mode, analysis)
-        if orbit_status == "orbit_not_supported_reliably":
-            diagnostics = PanoramaDiagnostics(
-                selected_frames=[{"frame_index": item.frame.index, "timestamp_seconds": item.frame.timestamp_seconds} for item in chain_result.selected_frames],
-                validated_frames=[{"frame_index": item.frame.index, "timestamp_seconds": item.frame.timestamp_seconds} for item in chain_result.filtered_frames],
-                rejected_frames=chain_result.rejected_frames,
-                pair_metrics=chain_result.pair_metrics,
-                feature_backend=chain_result.backend,
-                sampling_step=chain_result.sampling_step,
-                output_files=[],
-                capture_mode=decision.capture_mode,
-                projection=decision.projection,
-                strategy_confidence=decision.confidence,
-                strategy_reason=f"{decision.reason}; {orbit_status}",
-                strategy_measurements=decision.measurements,
-                status=orbit_status,
-            )
-            if self.config.save_debug_artifacts:
-                diagnostics.output_files.extend(write_diagnostics(output_path, self.config, diagnostics))
-            return PanoramaResult(image=None, metadata=metadata, diagnostics=diagnostics)
+
         trajectory: dict[str, list[float]] = {}
         if decision.capture_mode == "rotation":
             stabilized = stabilize_rotation_trajectory(chain_result.pairwise_homographies, self.config)
@@ -128,48 +152,108 @@ class PanoramaBuilder:
             trajectory = stabilized.diagnostics
         else:
             global_homographies = accumulate_global_homographies(chain_result.pairwise_homographies)
-        camera = CameraParameters.from_config(self.config, frame_shapes[0])
-        projection = create_projection(decision.projection, camera)
-        if decision.projection == "planar":
-            # Keep the established call contract and byte-for-byte planar path intact.
-            canvas = self.canvas_builder.build(frame_shapes, global_homographies)
-        else:
-            canvas = self.canvas_builder.build(frame_shapes, global_homographies, projection)
 
-        warped_frames = []
-        warped_masks = []
-        frame_sharpnesses = []
-        for selected, homography in zip(normalized_frames, global_homographies, strict=True):
+        return _BuildExecution(
+            metadata=metadata,
+            chain_result=chain_result,
+            decision=decision,
+            analysis=analysis,
+            orbit_status=self._orbit_status(decision.capture_mode, analysis),
+            normalized_frames=normalize_selected_frames(chain_result.filtered_frames, self.config),
+            global_homographies=global_homographies,
+            trajectory=trajectory,
+            keyframe_metrics=keyframe_metrics,
+        )
+
+    def _render_panorama(self, execution: _BuildExecution, output_path: str | Path) -> _RenderedPanorama:
+        frame_shapes = [item.frame.image.shape[:2] for item in execution.normalized_frames]
+        camera = CameraParameters.from_config(self.config, frame_shapes[0])
+        projection = create_projection(execution.decision.projection, camera)
+        if execution.decision.projection == "planar":
+            # Keep the established call contract and byte-for-byte planar path intact.
+            canvas = self.canvas_builder.build(frame_shapes, execution.global_homographies)
+        else:
+            canvas = self.canvas_builder.build(frame_shapes, execution.global_homographies, projection)
+
+        warped_frames, warped_masks, frame_sharpnesses = self._warp_frames(execution, canvas)
+        panorama = self._blend_warped_frames(execution.decision.projection, warped_frames, warped_masks, frame_sharpnesses)
+        visible_mask = self._combined_visible_mask(warped_masks)
+        panorama, visible_mask, gap_fill_metrics = self._apply_gap_fill(execution, panorama, visible_mask)
+        panorama, crop_policy, crop_loss, before_crop_size = self._postprocess_panorama(
+            execution,
+            output_path,
+            panorama,
+            visible_mask,
+        )
+        return _RenderedPanorama(
+            image=panorama,
+            crop_policy=crop_policy,
+            crop_loss=crop_loss,
+            crop_before_size=before_crop_size,
+            gap_fill_metrics=gap_fill_metrics,
+        )
+
+    def _warp_frames(
+        self,
+        execution: _BuildExecution,
+        canvas: CanvasModel,
+    ) -> tuple[list[np.ndarray], list[np.ndarray], list[float]]:
+        warped_frames: list[np.ndarray] = []
+        warped_masks: list[np.ndarray] = []
+        frame_sharpnesses: list[float] = []
+        for selected, homography in zip(execution.normalized_frames, execution.global_homographies, strict=True):
             warped, mask = self.warper.warp(selected.frame, homography, canvas)
             warped_frames.append(warped)
             warped_masks.append(mask)
             frame_sharpnesses.append(selected.quality.sharpness)
+        return warped_frames, warped_masks, frame_sharpnesses
 
-        if decision.projection == "planar":
-            panorama = self.blender.blend(warped_frames, warped_masks, frame_sharpnesses)
-        else:
-            panorama = self.blender.blend(
-                warped_frames,
-                warped_masks,
-                frame_sharpnesses,
-                prefer_sharp_source=True,
-            )
-        visible_mask = self._combined_visible_mask(warped_masks)
+    def _blend_warped_frames(
+        self,
+        projection: str,
+        warped_frames: list[np.ndarray],
+        warped_masks: list[np.ndarray],
+        frame_sharpnesses: list[float],
+    ) -> np.ndarray:
+        if projection == "planar":
+            return self.blender.blend(warped_frames, warped_masks, frame_sharpnesses)
+        return self.blender.blend(
+            warped_frames,
+            warped_masks,
+            frame_sharpnesses,
+            prefer_sharp_source=True,
+        )
+
+    def _apply_gap_fill(
+        self,
+        execution: _BuildExecution,
+        panorama: np.ndarray,
+        visible_mask: np.ndarray | None,
+    ) -> tuple[np.ndarray, np.ndarray | None, dict[str, float]]:
         gap_fill_metrics: dict[str, float] = {}
         if (
             self.config.enable_narrow_gap_fill
-            and decision.projection != "planar"
+            and execution.decision.projection != "planar"
             and not self.config.photo_mode
             and visible_mask is not None
         ):
             panorama, visible_mask, gap_fill_metrics = fill_narrow_mask_gaps(
                 panorama, visible_mask, self.config.max_narrow_gap_width
             )
+        return panorama, visible_mask, gap_fill_metrics
+
+    def _postprocess_panorama(
+        self,
+        execution: _BuildExecution,
+        output_path: str | Path,
+        panorama: np.ndarray,
+        visible_mask: np.ndarray | None,
+    ) -> tuple[np.ndarray, str, float, tuple[int, int]]:
         crop_policy = "none"
         crop_loss = 0.0
         before_crop_size = (panorama.shape[1], panorama.shape[0])
         if self.config.crop_result:
-            crop_policy = self._resolve_crop_policy(decision.projection)
+            crop_policy = self._resolve_crop_policy(execution.decision.projection)
             if crop_policy == "preserve_alpha" and Path(output_path).suffix.lower() not in {".png", ".webp", ".tiff"}:
                 raise ValueError("crop_policy preserve_alpha requires a PNG, WebP, or TIFF output")
             panorama, crop_policy, crop_loss = crop_with_policy(
@@ -181,18 +265,43 @@ class PanoramaBuilder:
                 force_inscribed=self.config.photo_mode,
                 inscribed_margin=(
                     self.config.photo_crop_margin_px
-                    if self.config.photo_mode and decision.projection != "planar"
+                    if self.config.photo_mode and execution.decision.projection != "planar"
                     else 0
                 ),
             )
-        panorama = apply_final_sharpening(panorama, self.config)
+        return apply_final_sharpening(panorama, self.config), crop_policy, crop_loss, before_crop_size
 
+    def _write_panorama_image(self, output_path: str | Path, panorama: np.ndarray) -> Path:
         output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
         if not cv2.imwrite(str(output), panorama):
             raise RuntimeError(f"Failed to write output image: {output}")
+        return output
 
-        diagnostics = PanoramaDiagnostics(
+    def _build_orbit_rejection_diagnostics(self, execution: _BuildExecution) -> PanoramaDiagnostics:
+        return PanoramaDiagnostics(
+            selected_frames=[{"frame_index": item.frame.index, "timestamp_seconds": item.frame.timestamp_seconds} for item in execution.chain_result.selected_frames],
+            validated_frames=[{"frame_index": item.frame.index, "timestamp_seconds": item.frame.timestamp_seconds} for item in execution.chain_result.filtered_frames],
+            rejected_frames=execution.chain_result.rejected_frames,
+            pair_metrics=execution.chain_result.pair_metrics,
+            feature_backend=execution.chain_result.backend,
+            sampling_step=execution.chain_result.sampling_step,
+            output_files=[],
+            capture_mode=execution.decision.capture_mode,
+            projection=execution.decision.projection,
+            strategy_confidence=execution.decision.confidence,
+            strategy_reason=f"{execution.decision.reason}; {execution.orbit_status}",
+            strategy_measurements=execution.decision.measurements,
+            status=execution.orbit_status,
+        )
+
+    def _build_success_diagnostics(
+        self,
+        execution: _BuildExecution,
+        rendered: _RenderedPanorama,
+        output: Path,
+    ) -> PanoramaDiagnostics:
+        return PanoramaDiagnostics(
             selected_frames=[
                 {
                     "frame_index": item.frame.index,
@@ -200,7 +309,7 @@ class PanoramaBuilder:
                     "sharpness": item.quality.sharpness,
                     "difference_score": item.quality.difference_score,
                 }
-                for item in chain_result.selected_frames
+                for item in execution.chain_result.selected_frames
             ],
             validated_frames=[
                 {
@@ -209,51 +318,53 @@ class PanoramaBuilder:
                     "sharpness": item.quality.sharpness,
                     "difference_score": item.quality.difference_score,
                 }
-                for item in chain_result.filtered_frames
+                for item in execution.chain_result.filtered_frames
             ],
-            rejected_frames=chain_result.rejected_frames,
-            pair_metrics=chain_result.pair_metrics,
-            feature_backend=chain_result.backend,
-            sampling_step=chain_result.sampling_step,
+            rejected_frames=execution.chain_result.rejected_frames,
+            pair_metrics=execution.chain_result.pair_metrics,
+            feature_backend=execution.chain_result.backend,
+            sampling_step=execution.chain_result.sampling_step,
             fallback_used=(
-                chain_result.backend != self.config.feature_backend
-                or chain_result.sampling_step != self.config.sampling_step
+                execution.chain_result.backend != self.config.feature_backend
+                or execution.chain_result.sampling_step != self.config.sampling_step
             ),
             fallback_attempted=(
-                len(chain_result.attempted_backends) > 1
-                or len(chain_result.attempted_sampling_steps) > 1
+                len(execution.chain_result.attempted_backends) > 1
+                or len(execution.chain_result.attempted_sampling_steps) > 1
             ),
-            attempted_backends=chain_result.attempted_backends,
-            attempted_sampling_steps=chain_result.attempted_sampling_steps,
+            attempted_backends=execution.chain_result.attempted_backends,
+            attempted_sampling_steps=execution.chain_result.attempted_sampling_steps,
             output_files=[str(output)],
-            capture_mode=decision.capture_mode,
-            projection=decision.projection,
-            strategy_confidence=decision.confidence,
-            strategy_reason=decision.reason,
-            strategy_measurements=decision.measurements,
-            crop_policy=crop_policy,
-            crop_before_size=before_crop_size,
-            crop_after_size=(panorama.shape[1], panorama.shape[0]),
-            crop_lost_area_fraction=crop_loss,
-            trajectory=trajectory,
+            capture_mode=execution.decision.capture_mode,
+            projection=execution.decision.projection,
+            strategy_confidence=execution.decision.confidence,
+            strategy_reason=execution.decision.reason,
+            strategy_measurements=execution.decision.measurements,
+            crop_policy=rendered.crop_policy,
+            crop_before_size=rendered.crop_before_size,
+            crop_after_size=(rendered.image.shape[1], rendered.image.shape[0]),
+            crop_lost_area_fraction=rendered.crop_loss,
+            trajectory=execution.trajectory,
             seam_metrics=self.blender.last_seam_metrics,
-            keyframe_metrics=keyframe_metrics,
+            keyframe_metrics=execution.keyframe_metrics,
             photometric_metrics=self.blender.last_photometric_metrics,
             global_photometric_metrics=self.blender.last_global_photometric_metrics,
-            gap_fill_metrics=gap_fill_metrics,
-            status=orbit_status,
+            gap_fill_metrics=rendered.gap_fill_metrics,
+            status=execution.orbit_status,
         )
-        if self.config.save_debug_artifacts:
-            effective_config = replace(
-                self.config,
-                feature_backend=chain_result.backend,
-                sampling_step=chain_result.sampling_step,
-            )
-            try:
-                diagnostics.output_files.extend(write_diagnostics(output, effective_config, diagnostics))
-            except OSError as exc:
-                LOGGER.warning("Failed to write debug artifacts for %s: %s", output, exc)
-        return PanoramaResult(image=panorama, metadata=metadata, diagnostics=diagnostics)
+
+    def _write_debug_diagnostics(
+        self,
+        output_path: str | Path,
+        config: PanoramaConfig,
+        diagnostics: PanoramaDiagnostics,
+    ) -> None:
+        if not self.config.save_debug_artifacts:
+            return
+        try:
+            diagnostics.output_files.extend(write_diagnostics(output_path, config, diagnostics))
+        except OSError as exc:
+            LOGGER.warning("Failed to write debug artifacts for %s: %s", output_path, exc)
 
     def _build_best_chain(self, video_path: str | Path) -> _ChainBuildResult:
         sampling_steps = self._sampling_steps_to_try()

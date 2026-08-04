@@ -1,6 +1,7 @@
 # mypy: disable-error-code="method-assign,assignment,arg-type"
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -8,13 +9,19 @@ from typing import Any, cast
 import numpy as np
 import pytest
 
-from panoramator.application.use_cases import PanoramaBuilder, _ChainBuildResult
+from panoramator.application.use_cases import (
+    PanoramaBuilder,
+    _BuildExecution,
+    _ChainBuildResult,
+    _RenderedPanorama,
+)
 from panoramator.config.models import PanoramaConfig
 from panoramator.domain.models import (
     FeatureSet,
     Frame,
     FrameQuality,
     MatchSet,
+    PanoramaDiagnostics,
     PairGeometry,
     SelectedFrame,
     VideoMetadata,
@@ -24,6 +31,7 @@ from panoramator.projection.models import (
     PlanarProjection,
     SphericalProjection,
 )
+from panoramator.strategy.resolver import BuildDecision
 
 
 def _selected_frame(index: int) -> SelectedFrame:
@@ -123,6 +131,184 @@ def test_is_better_chain_prefers_longer_valid_chain() -> None:
 
     assert PanoramaBuilder._is_better_chain(larger, smaller) is True
     assert PanoramaBuilder._is_better_chain(smaller, larger) is False
+
+
+def test_build_orbit_rejection_diagnostics_isolated_from_rendering() -> None:
+    builder = PanoramaBuilder(PanoramaConfig(save_debug_artifacts=False))
+    chain = _ChainBuildResult(
+        backend="orb",
+        sampling_step=15,
+        attempted_backends=["orb"],
+        attempted_sampling_steps=[15],
+        selected_frames=[_selected_frame(0), _selected_frame(1)],
+        rejected_frames=[{"frame_index": 1, "reason": "orbit"}],
+        filtered_frames=[_selected_frame(0), _selected_frame(1)],
+        pairwise_homographies=[np.eye(3, dtype=np.float64)],
+        pair_metrics=[{"valid": True}],
+    )
+    execution = _BuildExecution(
+        metadata=VideoMetadata(path=Path("input.mp4"), fps=30.0, frame_count=2, width=4, height=4),
+        chain_result=chain,
+        decision=BuildDecision("auto", "auto", "orbit", "planar", 0.75, "analysis", {"orbit_score": 0.9}),
+        analysis=SimpleNamespace(),
+        orbit_status="orbit_not_supported_reliably",
+        normalized_frames=chain.filtered_frames,
+        global_homographies=[np.eye(3, dtype=np.float64), np.eye(3, dtype=np.float64)],
+        trajectory={},
+        keyframe_metrics=[],
+    )
+
+    diagnostics = builder._build_orbit_rejection_diagnostics(execution)
+
+    assert diagnostics.status == "orbit_not_supported_reliably"
+    assert diagnostics.strategy_reason.endswith("orbit_not_supported_reliably")
+    assert diagnostics.output_files == []
+
+
+def test_build_success_diagnostics_can_be_assembled_without_file_io(tmp_path: Path) -> None:
+    builder = PanoramaBuilder(PanoramaConfig(save_debug_artifacts=False))
+    chain = _ChainBuildResult(
+        backend="sift",
+        sampling_step=8,
+        attempted_backends=["orb", "sift"],
+        attempted_sampling_steps=[15, 8],
+        selected_frames=[_selected_frame(0), _selected_frame(1)],
+        rejected_frames=[],
+        filtered_frames=[_selected_frame(0), _selected_frame(1)],
+        pairwise_homographies=[np.eye(3, dtype=np.float64)],
+        pair_metrics=[],
+    )
+    execution = _BuildExecution(
+        metadata=VideoMetadata(path=Path("input.mp4"), fps=30.0, frame_count=2, width=4, height=4),
+        chain_result=chain,
+        decision=BuildDecision("auto", "auto", "rotation", "cylindrical", 0.8, "analysis", {"rotation_score": 1.0}),
+        analysis=SimpleNamespace(),
+        orbit_status="ok",
+        normalized_frames=chain.filtered_frames,
+        global_homographies=[np.eye(3, dtype=np.float64), np.eye(3, dtype=np.float64)],
+        trajectory={"yaw": [0.0, 0.1]},
+        keyframe_metrics=[{"frame_index": 1.0, "decision": "accepted"}],
+    )
+    rendered = _RenderedPanorama(
+        image=np.zeros((6, 8, 3), dtype=np.uint8),
+        crop_policy="bounding",
+        crop_loss=0.1,
+        crop_before_size=(10, 6),
+        gap_fill_metrics={"filled_pixels": 5.0},
+    )
+
+    diagnostics = builder._build_success_diagnostics(execution, rendered, tmp_path / "out.png")
+
+    assert diagnostics.output_files == [str(tmp_path / "out.png")]
+    assert diagnostics.capture_mode == "rotation"
+    assert diagnostics.crop_after_size == (8, 6)
+    assert diagnostics.gap_fill_metrics == {"filled_pixels": 5.0}
+
+
+def test_build_from_video_returns_orbit_rejection_without_rendering(monkeypatch, tmp_path: Path) -> None:
+    builder = PanoramaBuilder(PanoramaConfig())
+    execution = _BuildExecution(
+        metadata=VideoMetadata(path=Path("input.mp4"), fps=30.0, frame_count=2, width=4, height=4),
+        chain_result=_ChainBuildResult(
+            backend="orb",
+            sampling_step=15,
+            attempted_backends=["orb"],
+            attempted_sampling_steps=[15],
+            selected_frames=[_selected_frame(0), _selected_frame(1)],
+            rejected_frames=[],
+            filtered_frames=[_selected_frame(0), _selected_frame(1)],
+            pairwise_homographies=[np.eye(3, dtype=np.float64)],
+            pair_metrics=[],
+        ),
+        decision=BuildDecision("auto", "auto", "orbit", "planar", 0.6, "analysis", {}),
+        analysis=SimpleNamespace(),
+        orbit_status="orbit_not_supported_reliably",
+        normalized_frames=[],
+        global_homographies=[],
+        trajectory={},
+        keyframe_metrics=[],
+    )
+    monkeypatch.setattr(builder, "_prepare_build", lambda video_path: execution)
+    monkeypatch.setattr(builder, "_render_panorama", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not render")))
+    monkeypatch.setattr(builder, "_write_debug_diagnostics", lambda output, config, diagnostics: diagnostics.output_files.append("debug.json"))
+
+    result = builder.build_from_video("input.mp4", tmp_path / "out.png")
+
+    assert result.image is None
+    assert result.diagnostics.status == "orbit_not_supported_reliably"
+    assert "debug.json" in result.diagnostics.output_files
+
+
+def test_apply_gap_fill_uses_fill_helper_for_non_planar_visible_mask(monkeypatch) -> None:
+    builder = PanoramaBuilder(PanoramaConfig(enable_narrow_gap_fill=True, photo_mode=False, max_narrow_gap_width=3))
+    execution = _BuildExecution(
+        metadata=VideoMetadata(path=Path("input.mp4"), fps=30.0, frame_count=2, width=4, height=4),
+        chain_result=cast(Any, None),
+        decision=BuildDecision("auto", "auto", "rotation", "cylindrical", 0.8, "analysis", {}),
+        analysis=SimpleNamespace(),
+        orbit_status="ok",
+        normalized_frames=[],
+        global_homographies=[],
+        trajectory={},
+        keyframe_metrics=[],
+    )
+    panorama = np.zeros((3, 3, 3), dtype=np.uint8)
+    visible_mask = np.ones((3, 3), dtype=np.uint8) * 255
+
+    monkeypatch.setattr(
+        "panoramator.application.use_cases.fill_narrow_mask_gaps",
+        lambda image, mask, width: (image + 1, mask // 255, {"filled_pixels": float(width)}),
+    )
+
+    filled, mask, metrics = builder._apply_gap_fill(execution, panorama, visible_mask)
+
+    assert np.array_equal(filled, panorama + 1)
+    assert np.array_equal(mask, np.ones((3, 3), dtype=np.uint8))
+    assert metrics == {"filled_pixels": 3.0}
+
+
+def test_postprocess_panorama_rejects_alpha_crop_for_non_alpha_output() -> None:
+    builder = PanoramaBuilder(PanoramaConfig(crop_result=True, crop_policy="preserve_alpha"))
+    execution = _BuildExecution(
+        metadata=VideoMetadata(path=Path("input.mp4"), fps=30.0, frame_count=2, width=4, height=4),
+        chain_result=cast(Any, None),
+        decision=BuildDecision("auto", "auto", "linear", "planar", 0.8, "analysis", {}),
+        analysis=SimpleNamespace(),
+        orbit_status="ok",
+        normalized_frames=[],
+        global_homographies=[],
+        trajectory={},
+        keyframe_metrics=[],
+    )
+
+    with pytest.raises(ValueError, match="preserve_alpha requires a PNG, WebP, or TIFF output"):
+        builder._postprocess_panorama(execution, "out.jpg", np.zeros((4, 4, 3), dtype=np.uint8), None)
+
+
+def test_write_panorama_image_raises_when_cv2_imwrite_fails(monkeypatch, tmp_path: Path) -> None:
+    builder = PanoramaBuilder(PanoramaConfig())
+    monkeypatch.setattr(
+        "panoramator.application.use_cases.cv2.imwrite",
+        lambda path, image: False,
+    )
+
+    with pytest.raises(RuntimeError, match="Failed to write output image"):
+        builder._write_panorama_image(tmp_path / "out.png", np.zeros((2, 2, 3), dtype=np.uint8))
+
+
+def test_write_debug_diagnostics_logs_oserror(monkeypatch, caplog) -> None:
+    builder = PanoramaBuilder(PanoramaConfig(save_debug_artifacts=True))
+    diagnostics = PanoramaDiagnostics()
+
+    def _raise(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("panoramator.application.use_cases.write_diagnostics", _raise)
+
+    with caplog.at_level(logging.WARNING):
+        builder._write_debug_diagnostics("out.png", builder.config, diagnostics)
+
+    assert "Failed to write debug artifacts" in caplog.text
 
 
 def test_build_best_chain_prefers_candidate_with_more_validated_frames(monkeypatch) -> None:
