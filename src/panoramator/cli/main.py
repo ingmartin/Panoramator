@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
+import os
 from pathlib import Path
+import sys
+import tomllib
+
+import cv2
 
 from panoramator.application.use_cases import PanoramaBuilder
 from panoramator.config.models import PanoramaConfig
@@ -12,6 +18,108 @@ from panoramator.object_unwrap import (
     UnwrapConfig,
     UnwrapStatus,
 )
+
+
+ROOT_DIR = Path(__file__).resolve().parents[3]
+ASCII_LOGO_PATH = ROOT_DIR / "assets" / "ascii.txt"
+
+
+def _read_ascii_logo() -> str:
+    if ASCII_LOGO_PATH.exists():
+        return ASCII_LOGO_PATH.read_text(encoding="utf-8").rstrip("\n")
+    return "Panoramator"
+
+
+def _format_label(value: str) -> str:
+    return value.replace("_", " ").title()
+
+
+def _format_opencv_version(version: str) -> str:
+    parts = version.split(".")
+    if len(parts) >= 2:
+        return ".".join(parts[:2])
+    return version
+
+
+def _detect_backend() -> str:
+    try:
+        if cv2.cuda.getCudaEnabledDeviceCount() > 0:
+            return "CUDA"
+    except Exception:
+        pass
+    return "CPU"
+
+
+def _get_package_version() -> str:
+    pyproject_version = _get_pyproject_version()
+    if pyproject_version != "0.0.0":
+        return pyproject_version
+    try:
+        return importlib.metadata.version("panoramator")
+    except importlib.metadata.PackageNotFoundError:
+        return "0.0.0"
+
+
+def _get_pyproject_version() -> str:
+    pyproject_path = ROOT_DIR / "pyproject.toml"
+    if not pyproject_path.exists():
+        return "0.0.0"
+    data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    project = data.get("project", {})
+    version = project.get("version")
+    if isinstance(version, str) and version:
+        return version
+    return "0.0.0"
+
+
+def _compose_columns(left_lines: list[str], right_lines: list[str], gap: int = 4) -> str:
+    left_width = max((len(line) for line in left_lines), default=0)
+    rows: list[str] = []
+    total_rows = max(len(left_lines), len(right_lines))
+    for index in range(total_rows):
+        left = left_lines[index] if index < len(left_lines) else ""
+        right = right_lines[index] if index < len(right_lines) else ""
+        if right:
+            rows.append(f"{left.ljust(left_width)}{' ' * gap}{right}")
+        else:
+            rows.append(left)
+    return "\n".join(rows)
+
+
+def format_version_screen() -> str:
+    config = PanoramaConfig()
+    version = _get_package_version()
+    python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+    opencv_version = _format_opencv_version(cv2.__version__)
+    threads = cv2.getNumThreads() or os.cpu_count() or 1
+    right_lines = [
+        f"Panoramator v{version}",
+        "------------------------------",
+        f"Python      {python_version}",
+        f"OpenCV      {opencv_version}",
+        f"Backend     {_detect_backend()}",
+        f"Threads     {threads}",
+        f"Projection  {_format_label(config.projection)}",
+        "Output      PNG/JPEG/WebP/TIFF",
+    ]
+    return _compose_columns(_read_ascii_logo().splitlines(), right_lines)
+
+
+def format_root_help(parser: argparse.ArgumentParser) -> str:
+    build = parser.build_subparser
+    unwrap = parser.unwrap_subparser
+    return "\n\n".join(
+        [
+            parser.format_help().rstrip(),
+            "Examples:\n"
+            "  panoramator build video.mp4 output.png\n"
+            "  panoramator build video.mp4 output.png --capture-mode rotation --horizontal-fov-degrees 70\n"
+            "  panoramator unwrap video.mp4 surface.png --surface auto --allow-partial\n"
+            "  panoramator unwrap video.mp4 surface.webp --publish-profile coverage_first --photo-mode",
+            "Build command:\n" + build.format_help().rstrip(),
+            "Unwrap command:\n" + unwrap.format_help().rstrip(),
+        ]
+    )
 
 
 def build_command(args: argparse.Namespace) -> int:
@@ -245,8 +353,15 @@ def export_config_command(args: argparse.Namespace) -> int:
 
 
 def create_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="panoramator")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(
+        prog="panoramator",
+        description="Build panoramas and object surface unwraps from video.",
+        formatter_class=argparse.RawTextHelpFormatter,
+        add_help=False,
+    )
+    parser.add_argument("-h", "--help", action="store_true", help="Show help for all major commands")
+    parser.add_argument("--version", action="store_true", help="Show runtime version information")
+    subparsers = parser.add_subparsers(dest="command")
 
     build = subparsers.add_parser("build", help="Build panorama from video")
     build.add_argument("video_path")
@@ -354,12 +469,20 @@ def create_parser() -> argparse.ArgumentParser:
     export_config = subparsers.add_parser("export-config", help="Export default config")
     export_config.add_argument("output_path", nargs="?", default=str(Path("panoramator.config.json")))
     export_config.set_defaults(func=export_config_command)
+    parser.build_subparser = build
+    parser.unwrap_subparser = unwrap
     return parser
 
 
 def main() -> int:
     parser = create_parser()
     args = parser.parse_args()
+    if getattr(args, "version", False):
+        print(format_version_screen())
+        return 0
+    if getattr(args, "help", False) or not hasattr(args, "func"):
+        print(format_root_help(parser))
+        return 0
     return args.func(args)
 
 

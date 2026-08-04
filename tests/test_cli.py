@@ -382,6 +382,8 @@ def test_export_config_command_saves_file(tmp_path, capsys) -> None:
 def test_create_parser_routes_supported_subcommands() -> None:
     parser = cli_main.create_parser()
 
+    root_help_args = parser.parse_args(["--help"])
+    version_args = parser.parse_args(["--version"])
     build_args = parser.parse_args(
         [
             "build", "video.mp4", "out.png", "--photo-mode", "--sampling-step", "7",
@@ -399,6 +401,8 @@ def test_create_parser_routes_supported_subcommands() -> None:
         ]
     )
 
+    assert root_help_args.help is True
+    assert version_args.version is True
     assert build_args.func is cli_main.build_command
     assert build_args.photo_mode is True
     assert build_args.sampling_step == 7
@@ -422,6 +426,53 @@ def test_create_parser_routes_supported_subcommands() -> None:
     assert export_args.func is cli_main.export_config_command
 
 
+def test_format_root_help_includes_examples_and_build_unwrap_options() -> None:
+    parser = cli_main.create_parser()
+
+    help_text = cli_main.format_root_help(parser)
+
+    assert "Examples:" in help_text
+    assert "panoramator build video.mp4 output.png" in help_text
+    assert "panoramator unwrap video.mp4 surface.png --surface auto --allow-partial" in help_text
+    assert "Build command:" in help_text
+    assert "Unwrap command:" in help_text
+    assert "--capture-mode" in help_text
+    assert "--publish-profile" in help_text
+
+
+def test_format_version_screen_includes_runtime_summary(monkeypatch) -> None:
+    monkeypatch.setattr(cli_main, "_read_ascii_logo", lambda: "LOGO")
+    monkeypatch.setattr(cli_main, "_get_package_version", lambda: "0.3.2")
+    monkeypatch.setattr(cli_main.cv2, "__version__", "5.0.0")
+    monkeypatch.setattr(cli_main.cv2, "getNumThreads", lambda: 16)
+    monkeypatch.setattr(cli_main, "_detect_backend", lambda: "CUDA")
+
+    screen = cli_main.format_version_screen()
+
+    assert "LOGO" in screen
+    assert "Panoramator v0.3.2" in screen
+    assert "OpenCV      5.0" in screen
+    assert "Backend     CUDA" in screen
+    assert "Threads     16" in screen
+    assert "Projection  Auto" in screen
+    assert "Output      PNG/JPEG/WebP/TIFF" in screen
+
+
+def test_get_package_version_prefers_pyproject_when_available(monkeypatch) -> None:
+    monkeypatch.setattr(cli_main.importlib.metadata, "version", lambda _: "0.2.0")
+    monkeypatch.setattr(cli_main, "_get_pyproject_version", lambda: "0.3.2")
+
+    assert cli_main._get_package_version() == "0.3.2"
+
+
+def test_get_pyproject_version_reads_project_version(tmp_path, monkeypatch) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nversion = "1.2.3"\n', encoding="utf-8")
+    monkeypatch.setattr(cli_main, "ROOT_DIR", tmp_path)
+
+    assert cli_main._get_pyproject_version() == "1.2.3"
+
+
 def test_main_dispatches_selected_command(monkeypatch) -> None:
     parser = cli_main.create_parser()
     args = argparse.Namespace(func=lambda parsed: 17)
@@ -430,3 +481,29 @@ def test_main_dispatches_selected_command(monkeypatch) -> None:
     monkeypatch.setattr(parser, "parse_args", lambda: args)
 
     assert cli_main.main() == 17
+
+
+def test_main_prints_root_help_without_command(monkeypatch, capsys) -> None:
+    parser = cli_main.create_parser()
+    args = argparse.Namespace(help=False, version=False, command=None)
+
+    monkeypatch.setattr(cli_main, "create_parser", lambda: parser)
+    monkeypatch.setattr(parser, "parse_args", lambda: args)
+
+    assert cli_main.main() == 0
+    output = capsys.readouterr().out
+    assert "Examples:" in output
+    assert "Build command:" in output
+    assert "Unwrap command:" in output
+
+
+def test_main_prints_version_screen(monkeypatch, capsys) -> None:
+    parser = cli_main.create_parser()
+    args = argparse.Namespace(help=False, version=True)
+
+    monkeypatch.setattr(cli_main, "create_parser", lambda: parser)
+    monkeypatch.setattr(parser, "parse_args", lambda: args)
+    monkeypatch.setattr(cli_main, "format_version_screen", lambda: "VERSION SCREEN")
+
+    assert cli_main.main() == 0
+    assert "VERSION SCREEN" in capsys.readouterr().out
