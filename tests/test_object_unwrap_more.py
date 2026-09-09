@@ -5,7 +5,6 @@ import cv2
 import numpy as np
 import pytest
 
-from panoramator.cli.main import unwrap_command
 from panoramator.domain.models import Frame
 from panoramator.object_unwrap import analyzer as analyzer_module
 from panoramator.object_unwrap.analyzer import Analysis, AnalyzedFrame, VideoAnalyzer
@@ -25,11 +24,13 @@ from panoramator.object_unwrap.models import (
     PublishProfile,
     SurfaceKind,
     SurfaceModel,
+    SurfaceOutputMode,
     UnwrapConfig,
     UnwrapDiagnostics,
     UnwrapResult,
     UnwrapStatus,
 )
+from panoramator.object_unwrap.observed_surface import ObservedSurfaceBuild
 from panoramator.object_unwrap.planar_mosaic import build_planar_mosaic
 from panoramator.object_unwrap.pose import optimize_rotation_angles
 from panoramator.object_unwrap.rectification import (
@@ -54,6 +55,25 @@ def _analyzed_frame(index: int = 0) -> AnalyzedFrame:
     image = np.full((32, 24, 3), 100, np.uint8)
     mask = np.full((32, 24), 255, np.uint8)
     return AnalyzedFrame(Frame(index, float(index), image), mask, mask.copy(), 100.0, (0, 0, 24, 32))
+
+
+def _selection_frame(
+    geometry_mask: np.ndarray,
+    core_mask: np.ndarray,
+    bbox: tuple[int, int, int, int],
+    index: int,
+) -> AnalyzedFrame:
+    image = np.full((*geometry_mask.shape, 3), 100 + index, np.uint8)
+    nuisance = cv2.bitwise_and(geometry_mask, cv2.bitwise_not(core_mask))
+    return AnalyzedFrame(
+        Frame(index, float(index), image),
+        geometry_mask,
+        core_mask.copy(),
+        100.0,
+        bbox,
+        core_mask=core_mask.copy(),
+        nuisance_mask=nuisance,
+    )
 
 
 def test_segmentation_helpers_return_foreground_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -137,6 +157,48 @@ def test_analyzer_reports_blur_and_auto_selects_cylindrical(monkeypatch: pytest.
     selected = VideoAnalyzer().analyze([frame, frame], UnwrapConfig(surface_kind=SurfaceKind.AUTO, blur_threshold=20.0))
     assert selected.status is None
     assert selected.kind is SurfaceKind.CYLINDRICAL
+    assert selected.measurements is not None
+    assert selected.measurements["surface_family_candidate"] == "cylindrical"
+    assert selected.measurements["surface_family_validated"] == "cylindrical"
+
+
+def test_surface_family_selection_keeps_cylinder_with_handle_in_cylindrical_path() -> None:
+    geometry = np.zeros((48, 40), np.uint8)
+    geometry[8:42, 10:28] = 255
+    geometry[16:32, 28:35] = 255
+    core = np.zeros_like(geometry)
+    core[8:42, 10:28] = 255
+    frames = [
+        _selection_frame(geometry, core, (10, 8, 18, 34), 0),
+        _selection_frame(geometry, core, (11, 8, 18, 34), 1),
+    ]
+
+    measurements = analyzer_module._select_surface_family(frames)
+
+    assert measurements["surface_family_candidate"] == "cylindrical"
+    assert measurements["surface_family_validated"] == "cylindrical"
+    assert float(measurements["nuisance_region_ratio"]) > 0.0
+
+
+def test_surface_family_selection_rejects_curved_body_with_unstable_sidewalls() -> None:
+    geometry = np.zeros((48, 40), np.uint8)
+    for row in range(8, 42):
+        width = 8 + (row - 8) // 2
+        left = max(4, 20 - width // 2)
+        right = min(35, 20 + width // 2)
+        geometry[row, left : right + 1] = 255
+    frames = [
+        _selection_frame(geometry, geometry, (8, 8, 24, 34), 0),
+        _selection_frame(np.roll(geometry, 2, axis=1), np.roll(geometry, 2, axis=1), (10, 8, 24, 34), 1),
+    ]
+
+    measurements = analyzer_module._select_surface_family(frames)
+
+    assert measurements["surface_family_validated"] == "curved"
+    assert measurements["surface_family_reason"] in {
+        "cylindrical_candidate_rejected_by_confidence",
+        "core_body_aspect_out_of_range",
+    }
 
 
 def test_analyzer_temporal_decimation_rejects_near_duplicate_frames(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -180,11 +242,26 @@ def test_analyzer_can_disable_temporal_decimation(monkeypatch: pytest.MonkeyPatc
 
     assert analysis.status is None
     assert [item.frame.index for item in analysis.frames] == [0, 1, 2]
-    assert analysis.measurements == {
-        "temporal_decimation_applied": 0,
-        "temporal_decimation_kept_frames": 3,
-        "temporal_decimation_rejected_frames": 0,
-    }
+    assert analysis.measurements is not None
+    assert analysis.measurements["temporal_decimation_applied"] == 0
+    assert analysis.measurements["temporal_decimation_kept_frames"] == 3
+    assert analysis.measurements["temporal_decimation_rejected_frames"] == 0
+    assert analysis.measurements["surface_family_validated"] == "cylindrical"
+
+
+def test_surface_family_selection_regression_fixture_keeps_candidate_and_validated_values() -> None:
+    geometry = np.zeros((48, 40), np.uint8)
+    geometry[8:42, 10:28] = 255
+    core = geometry.copy()
+    frames = [
+        _selection_frame(geometry, core, (10, 8, 18, 34), 0),
+        _selection_frame(np.roll(geometry, 1, axis=1), np.roll(core, 1, axis=1), (11, 8, 18, 34), 1),
+    ]
+
+    measurements = analyzer_module._select_surface_family(frames)
+
+    assert measurements["surface_family_candidate"] == "cylindrical"
+    assert measurements["surface_family_validated"] == "cylindrical"
 
 
 def test_analyzer_temporal_decimation_rejects_low_surface_contribution(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -527,23 +604,11 @@ def test_pose_estimate_and_curved_fallback_are_explicit_about_confidence(monkeyp
     assert estimate.confidence == pytest.approx(0.25)
     assert optimize_rotation_angles([10.0], 0).confidence == 0.0
 
-    from panoramator.object_unwrap.curved import builder as curved_builder_module
-
-    monkeypatch.setattr(
-        curved_builder_module.CylinderUnwrapBuilder,
-        "build",
-        lambda self, frames, config: (
-            np.zeros((2, 2, 3), np.uint8),
-            np.ones((2, 2), np.uint8),
-            SurfaceModel(SurfaceKind.CYLINDRICAL, confidence=0.8),
-            {},
-            {},
-        ),
-    )
     _, _, model, measurements, _ = CurvedSurfaceFallbackBuilder().build([_analyzed_frame()], UnwrapConfig())
     assert model.kind is SurfaceKind.CURVED
     assert model.confidence == pytest.approx(0.4)
     assert measurements["fallback"] == "dominant_side_band"
+    assert measurements["surface_builder"] == "curved_side_band_fallback"
 
 
 def test_builder_without_global_pose_uses_feature_shift_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -586,7 +651,7 @@ def test_builder_without_global_pose_uses_feature_shift_fallback(monkeypatch: py
         ),
     )
 
-    assert measurements["rendering"] == "experimental_frame_projection"
+    assert measurements["rendering"] == "inverse_cylindrical_atlas"
     assert measurements["accepted_pose_pairs"] == 0
     assert measurements["rejected_pose_pairs"] == 2
     assert measurements["quality_gate_passed"] == 0
@@ -728,7 +793,7 @@ def test_unwrapper_returns_unstable_geometry_without_planar_fallback(monkeypatch
     assert result.output_path is None
 
 
-def test_decide_publication_uses_planar_fallback_without_file_output() -> None:
+def test_decide_publication_keeps_unstable_status_even_when_planar_fallback_exists() -> None:
     analysis = Analysis([_analyzed_frame(0), _analyzed_frame(1), _analyzed_frame(2)], SurfaceKind.CYLINDRICAL)
     planar = np.full((5, 7, 3), 90, np.uint8)
     planar_coverage = np.full((5, 7), 255, np.uint8)
@@ -749,10 +814,10 @@ def test_decide_publication_uses_planar_fallback_without_file_output() -> None:
 
     decision = ObjectUnwrapper(UnwrapConfig(allow_partial=True))._decide_publication(analysis, build)
 
-    assert decision.status is UnwrapStatus.PARTIAL_SURFACE
-    assert decision.message.startswith("A connected image-space mosaic is available")
-    assert np.array_equal(decision.image, planar)
-    assert np.array_equal(decision.coverage, planar_coverage)
+    assert decision.status is UnwrapStatus.UNSTABLE_CAMERA_GEOMETRY
+    assert "do not treat fallback mosaics as confirmed unwrap geometry" in decision.recommendation
+    assert np.array_equal(decision.image, build.image)
+    assert np.array_equal(decision.coverage, build.coverage)
 
 
 def test_build_surface_uses_curved_fallback_and_analysis_measurements(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -779,11 +844,14 @@ def test_build_surface_uses_curved_fallback_and_analysis_measurements(monkeypatc
 
     assert build.fallback_used is True
     assert build.measurements["surface_coverage_fraction"] == 1.0
+    assert build.measurements["observed_coverage_fraction"] == 1.0
+    assert build.measurements["publishable_surface_coverage_fraction"] == 1.0
+    assert build.measurements["fallback_mosaic_coverage_fraction"] == 0.0
     assert build.measurements["analysis_score"] == 7
     assert build.measurements["frame_count"] == 2
 
 
-def test_decide_publication_prefers_rectified_partial_when_geometry_is_rejected() -> None:
+def test_decide_publication_keeps_unstable_status_when_rectified_band_exists_but_geometry_is_rejected() -> None:
     analysis = Analysis([_analyzed_frame(0), _analyzed_frame(1), _analyzed_frame(2)], SurfaceKind.CYLINDRICAL)
     build = _SurfaceBuild(
         image=np.full((6, 8, 3), 140, np.uint8),
@@ -802,8 +870,8 @@ def test_decide_publication_prefers_rectified_partial_when_geometry_is_rejected(
 
     decision = ObjectUnwrapper(UnwrapConfig(allow_partial=True))._decide_publication(analysis, build)
 
-    assert decision.status is UnwrapStatus.PARTIAL_SURFACE
-    assert decision.message.startswith("A rectified observed band is available")
+    assert decision.status is UnwrapStatus.UNSTABLE_CAMERA_GEOMETRY
+    assert decision.message.startswith("The tracked views do not agree on one stable surface trajectory.")
 
 
 def test_decide_publication_returns_quality_gate_message_when_geometry_is_ok() -> None:
@@ -849,7 +917,7 @@ def test_decide_publication_returns_fallback_message_for_curved_surface_build() 
     decision = ObjectUnwrapper(UnwrapConfig(allow_partial=True))._decide_publication(analysis, build)
 
     assert decision.status is UnwrapStatus.PARTIAL_SURFACE
-    assert decision.message.startswith("Only the observed side band is available")
+    assert decision.message.startswith("Only the observed side band is available; cylindrical geometry was not claimed")
 
 
 def test_decide_publication_returns_non_rectified_partial_message() -> None:
@@ -872,9 +940,266 @@ def test_decide_publication_returns_non_rectified_partial_message() -> None:
     decision = ObjectUnwrapper(UnwrapConfig(allow_partial=True))._decide_publication(analysis, build)
 
     assert decision.status is UnwrapStatus.PARTIAL_SURFACE
-    assert decision.message.startswith("A partial observed surface band was assembled, but the mosaic did not support")
+    assert decision.message.startswith("A geometry-confirmed cylindrical surface band was assembled, but the mosaic did not support")
 
 
+def test_decide_publication_allows_observed_surface_for_curved_fallback_without_allow_partial() -> None:
+    analysis = Analysis([_analyzed_frame(0), _analyzed_frame(1)], SurfaceKind.CURVED)
+    build = _SurfaceBuild(
+        image=np.full((6, 8, 3), 140, np.uint8),
+        coverage=np.full((6, 8), 255, np.uint8),
+        model=SurfaceModel(SurfaceKind.CURVED),
+        measurements={"quality_gate_passed": 0, "rectification_applied": 0},
+        artifacts={},
+        fallback_used=True,
+    )
+
+    decision = ObjectUnwrapper(UnwrapConfig(surface_output_mode=SurfaceOutputMode.OBSERVED_SURFACE))._decide_publication(analysis, build)
+
+    assert decision.status is UnwrapStatus.OBSERVED_SURFACE
+    assert decision.publication_mode == "observed_surface"
+    assert decision.geometry_confirmation == "not_confirmed"
+    assert "observed surface band was published" in decision.message
+    assert "geometry-confirmed" not in decision.message
+
+
+def test_decide_publication_observed_surface_keeps_confirmation_state_for_cylindrical_result() -> None:
+    analysis = Analysis([_analyzed_frame(0), _analyzed_frame(1), _analyzed_frame(2)], SurfaceKind.CYLINDRICAL)
+    build = _SurfaceBuild(
+        image=np.full((6, 8, 3), 140, np.uint8),
+        coverage=np.full((6, 8), 255, np.uint8),
+        model=SurfaceModel(SurfaceKind.CYLINDRICAL),
+        measurements={"quality_gate_passed": 1, "rectification_applied": 1},
+        artifacts={},
+        fallback_used=False,
+    )
+
+    decision = ObjectUnwrapper(UnwrapConfig(surface_output_mode=SurfaceOutputMode.OBSERVED_SURFACE))._decide_publication(analysis, build)
+
+    assert decision.status is UnwrapStatus.OBSERVED_SURFACE
+    assert decision.geometry_confirmation == "confirmed"
+
+
+def test_unwrapper_does_not_call_observed_branch_for_confirmed_geometry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from panoramator.object_unwrap import observed_surface, service
+
+    analysis = Analysis([_analyzed_frame(0), _analyzed_frame(1), _analyzed_frame(2)], SurfaceKind.CYLINDRICAL)
+    build = _SurfaceBuild(
+        image=np.full((6, 8, 3), 140, np.uint8),
+        coverage=np.full((6, 8), 255, np.uint8),
+        model=SurfaceModel(SurfaceKind.CYLINDRICAL),
+        measurements={
+            "surface_coverage_fraction": 1.0,
+            "pose_residual_radians": 0.01,
+            "accepted_pose_pairs": 2,
+            "quality_gate_passed": 1,
+            "rectification_applied": 1,
+        },
+        artifacts={},
+        fallback_used=False,
+    )
+    called = False
+
+    def fake_observed_build(self, current_analysis, config, baseline_build):
+        nonlocal called
+        called = True
+        return ObservedSurfaceBuild(
+            baseline_build.image,
+            baseline_build.coverage,
+            baseline_build.model,
+            dict(baseline_build.measurements),
+            dict(baseline_build.artifacts),
+        )
+
+    monkeypatch.setattr(service.ObjectUnwrapper, "_analyze_video", lambda self, path: analysis)
+    monkeypatch.setattr(service.ObjectUnwrapper, "_build_surface", lambda self, current: build)
+    monkeypatch.setattr(observed_surface.ObservedSurfaceBuilder, "build", fake_observed_build)
+
+    output = tmp_path / "surface.png"
+    result = ObjectUnwrapper(UnwrapConfig(allow_partial=True)).unwrap_video("input.mp4", output)
+
+    assert called is False
+    assert result.diagnostics.measurements["publication_mode"] == "confirmed_geometry"
+
+
+def test_unwrapper_calls_observed_branch_for_observed_surface_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from panoramator.object_unwrap import observed_surface, service
+
+    analysis = Analysis([_analyzed_frame(0), _analyzed_frame(1), _analyzed_frame(2)], SurfaceKind.CURVED)
+    build = _SurfaceBuild(
+        image=np.full((6, 8, 3), 140, np.uint8),
+        coverage=np.full((6, 8), 255, np.uint8),
+        model=SurfaceModel(SurfaceKind.CURVED),
+        measurements={"quality_gate_passed": 0, "rectification_applied": 0},
+        artifacts={},
+        fallback_used=True,
+    )
+    called = False
+
+    def fake_observed_build(self, current_analysis, config, baseline_build):
+        nonlocal called
+        called = True
+        measurements = dict(baseline_build.measurements)
+        measurements.update(
+            {
+                "observed_branch_applied": 1,
+                "observed_branch_input_frame_count": 3,
+                "observed_branch_axis_valid_frame_count": 3,
+                "observed_branch_selected_frame_count": 3,
+                "observed_branch_redundant_frame_count": 0,
+                "observed_branch_mask_fallback_count": 0,
+                "observed_branch_canvas_width": 8,
+                "observed_branch_canvas_height": 6,
+                "observed_branch_used_angular_steps": 1,
+                "observed_branch_used_phase_correlation": 0,
+                "observed_branch_used_bbox_fallback": 0,
+                "observed_branch_coverage_fraction": 1.0,
+                "observed_branch_overlap_conflict_fraction": 0.0,
+                "observed_branch_mean_gradient_gain": 0.0,
+            }
+        )
+        return ObservedSurfaceBuild(
+            baseline_build.image,
+            baseline_build.coverage,
+            baseline_build.model,
+            measurements,
+            {
+                **baseline_build.artifacts,
+                "observed_branch_selected_frames": [{"frame_index": 0, "timestamp_seconds": 0.0}],
+                "observed_branch_axis_valid_frames": [{"frame_index": 0, "timestamp_seconds": 0.0}],
+                "observed_branch_rejected_frames": [],
+            },
+        )
+
+    monkeypatch.setattr(service.ObjectUnwrapper, "_analyze_video", lambda self, path: analysis)
+    monkeypatch.setattr(service.ObjectUnwrapper, "_build_surface", lambda self, current: build)
+    monkeypatch.setattr(observed_surface.ObservedSurfaceBuilder, "build", fake_observed_build)
+
+    output = tmp_path / "surface.png"
+    result = ObjectUnwrapper(UnwrapConfig(surface_output_mode=SurfaceOutputMode.OBSERVED_SURFACE)).unwrap_video("input.mp4", output)
+
+    assert called is True
+    assert result.diagnostics.status is UnwrapStatus.OBSERVED_SURFACE
+    assert result.diagnostics.surface_kind is SurfaceKind.CURVED
+    assert result.diagnostics.message == (
+        "A coverage-first observed surface band was assembled from the analyzed orbit frames without claiming confirmed cylindrical geometry."
+    )
+
+
+def test_unwrapper_publishes_observed_surface_without_allow_partial(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from panoramator.object_unwrap import service
+
+    analysis = Analysis([_analyzed_frame(0), _analyzed_frame(1)], SurfaceKind.CURVED, measurements={"analysis_score": 7})
+    build = _SurfaceBuild(
+        image=np.full((6, 8, 3), 140, np.uint8),
+        coverage=np.full((6, 8), 255, np.uint8),
+        model=SurfaceModel(SurfaceKind.CURVED),
+        measurements={"quality_gate_passed": 0, "rectification_applied": 0},
+        artifacts={},
+        fallback_used=True,
+    )
+
+    monkeypatch.setattr(service.ObjectUnwrapper, "_analyze_video", lambda self, path: analysis)
+    monkeypatch.setattr(service.ObjectUnwrapper, "_build_surface", lambda self, current: build)
+
+    output = tmp_path / "surface.png"
+    result = ObjectUnwrapper(UnwrapConfig(surface_output_mode=SurfaceOutputMode.OBSERVED_SURFACE)).unwrap_video("input.mp4", output)
+
+    assert result.output_path == output
+    assert result.diagnostics.status is UnwrapStatus.OBSERVED_SURFACE
+    assert result.diagnostics.measurements["publication_mode"] == "observed_surface"
+    assert result.diagnostics.measurements["geometry_confirmation"] == "not_confirmed"
+    assert result.diagnostics.measurements["surface_output_intent"] == "observed_surface"
+    assert result.diagnostics.surface_kind is SurfaceKind.CURVED
+
+
+def test_unwrapper_writes_observed_branch_artifacts_and_diagnostics(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from panoramator.object_unwrap import observed_surface, service
+
+    analysis = Analysis([_analyzed_frame(0), _analyzed_frame(1), _analyzed_frame(2)], SurfaceKind.CURVED)
+    build = _SurfaceBuild(
+        image=np.full((6, 8, 3), 90, np.uint8),
+        coverage=np.full((6, 8), 255, np.uint8),
+        model=SurfaceModel(SurfaceKind.CURVED),
+        measurements={"quality_gate_passed": 0, "rectification_applied": 0},
+        artifacts={},
+        fallback_used=True,
+    )
+
+    def fake_observed_build(self, current_analysis, config, baseline_build):
+        measurements = dict(baseline_build.measurements)
+        measurements.update(
+            {
+                "observed_branch_applied": 1,
+                "observed_branch_input_frame_count": 3,
+                "observed_branch_axis_valid_frame_count": 3,
+                "observed_branch_selected_frame_count": 3,
+                "observed_branch_redundant_frame_count": 0,
+                "observed_branch_mask_fallback_count": 1,
+                "observed_branch_canvas_width": 8,
+                "observed_branch_canvas_height": 6,
+                "observed_branch_used_angular_steps": 0,
+                "observed_branch_used_phase_correlation": 1,
+                "observed_branch_used_bbox_fallback": 0,
+                "observed_branch_coverage_fraction": 1.0,
+                "observed_branch_overlap_conflict_fraction": 0.1,
+                "observed_branch_mean_gradient_gain": 0.2,
+            }
+        )
+        artifacts = {
+            **baseline_build.artifacts,
+            "observed_branch_mosaic": np.full((6, 8, 3), 120, np.uint8),
+            "observed_branch_coverage": np.full((6, 8), 255, np.uint8),
+            "observed_branch_source": np.ones((6, 8), np.uint16),
+            "observed_branch_selected_frames": [{"frame_index": 1, "timestamp_seconds": 1.0}],
+            "observed_branch_axis_valid_frames": [{"frame_index": 1, "timestamp_seconds": 1.0}],
+            "observed_branch_rejected_frames": [],
+        }
+        return ObservedSurfaceBuild(
+            np.full((6, 8, 3), 120, np.uint8),
+            np.full((6, 8), 255, np.uint8),
+            baseline_build.model,
+            measurements,
+            artifacts,
+        )
+
+    monkeypatch.setattr(service.ObjectUnwrapper, "_analyze_video", lambda self, path: analysis)
+    monkeypatch.setattr(service.ObjectUnwrapper, "_build_surface", lambda self, current: build)
+    monkeypatch.setattr(observed_surface.ObservedSurfaceBuilder, "build", fake_observed_build)
+
+    output = tmp_path / "surface.png"
+    result = ObjectUnwrapper(
+        UnwrapConfig(surface_output_mode=SurfaceOutputMode.OBSERVED_SURFACE, save_debug_artifacts=True)
+    ).unwrap_video("input.mp4", output)
+
+    for key in (
+        "observed_branch_applied",
+        "observed_branch_input_frame_count",
+        "observed_branch_axis_valid_frame_count",
+        "observed_branch_selected_frame_count",
+        "observed_branch_redundant_frame_count",
+        "observed_branch_mask_fallback_count",
+        "observed_branch_canvas_width",
+        "observed_branch_canvas_height",
+        "observed_branch_used_angular_steps",
+        "observed_branch_used_phase_correlation",
+        "observed_branch_used_bbox_fallback",
+        "observed_branch_coverage_fraction",
+        "observed_branch_overlap_conflict_fraction",
+        "observed_branch_mean_gradient_gain",
+    ):
+        assert key in result.diagnostics.measurements
+
+    output_files = set(result.diagnostics.output_files)
+    assert str(tmp_path / "surface_debug" / "observed_branch_mosaic.png") in output_files
+    assert str(tmp_path / "surface_debug" / "observed_branch_coverage.png") in output_files
+    assert str(tmp_path / "surface_debug" / "observed_branch_source.png") in output_files
 def test_unwrapper_returns_partial_without_output_when_partial_results_are_disabled(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
@@ -976,7 +1301,7 @@ def test_unwrapper_reports_experimental_renderer_when_global_pose_is_disabled(
 
     assert result.image is not None
     assert result.diagnostics.status is UnwrapStatus.PARTIAL_SURFACE
-    assert "experimental renderer" in result.diagnostics.message
+    assert "cylindrical atlas" in result.diagnostics.message
     assert "global pose optimization" in result.diagnostics.recommendation
 
 
@@ -1089,6 +1414,8 @@ def test_render_publishable_surface_applies_photo_mode_and_alpha_without_writing
         recommendation="retry",
         image=np.full((6, 10, 3), 120, np.uint8),
         coverage=coverage,
+        publication_mode="confirmed_geometry",
+        geometry_confirmation="not_confirmed",
     )
 
     bgra, rendered_coverage = ObjectUnwrapper(
@@ -1147,7 +1474,7 @@ def test_write_publishable_surface_validates_suffix_and_imwrite_failure(monkeypa
         unwrapper._write_publishable_surface(tmp_path / "out.png", bgra)
 
 
-def test_unwrapper_photo_mode_applies_to_planar_fallback_when_crop_is_safe(
+def test_unwrapper_photo_mode_stays_ineligible_when_geometry_is_not_confirmed_even_if_a_fallback_mosaic_exists(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     from panoramator.object_unwrap import service
@@ -1193,11 +1520,12 @@ def test_unwrapper_photo_mode_applies_to_planar_fallback_when_crop_is_safe(
     output = tmp_path / "surface.png"
     result = ObjectUnwrapper(UnwrapConfig(allow_partial=True, photo_mode=True)).unwrap_video("input.mp4", output)
 
-    saved = cv2.imread(str(output), cv2.IMREAD_UNCHANGED)
-    assert saved.shape[:2] == planar_coverage.shape
-    assert result.diagnostics.measurements["photo_mode_eligible"] == 1
-    assert result.diagnostics.measurements["photo_mode_applied"] == 1
-    assert result.diagnostics.measurements["photo_mode_crop_policy"] == "inscribed_rectangle"
+    assert result.output_path is None
+    assert not output.exists()
+    assert result.diagnostics.status is UnwrapStatus.UNSTABLE_CAMERA_GEOMETRY
+    assert result.diagnostics.measurements["photo_mode_eligible"] == 0
+    assert result.diagnostics.measurements["photo_mode_applied"] == 0
+    assert result.diagnostics.measurements["photo_mode_crop_policy"] == "skipped_ineligible"
 
 
 def test_unwrapper_photo_mode_rejects_excessive_crop_loss(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -1370,7 +1698,7 @@ def test_unwrapper_crop_result_preserves_internal_transparency(monkeypatch: pyte
     assert np.any(saved[:, :, 3] == 255)
 
 
-def test_unwrapper_uses_planar_fallback_when_geometry_is_not_confirmed(
+def test_unwrapper_keeps_unstable_geometry_when_planar_fallback_exists(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     from panoramator.object_unwrap import service
@@ -1416,12 +1744,11 @@ def test_unwrapper_uses_planar_fallback_when_geometry_is_not_confirmed(
     output = tmp_path / "surface.png"
     result = ObjectUnwrapper(UnwrapConfig(allow_partial=True)).unwrap_video("input.mp4", output)
 
-    saved = cv2.imread(str(output), cv2.IMREAD_UNCHANGED)
-    assert result.diagnostics.status is UnwrapStatus.PARTIAL_SURFACE
-    assert result.diagnostics.message.startswith("A connected image-space mosaic is available")
-    assert saved.shape[:2] == planar_coverage.shape
-    assert np.all(saved[:, :, :3] == 90)
-    assert np.array_equal(saved[:, :, 3], planar_coverage)
+    assert result.diagnostics.status is UnwrapStatus.UNSTABLE_CAMERA_GEOMETRY
+    assert result.output_path is None
+    assert not output.exists()
+    assert result.coverage is not None
+    assert result.diagnostics.measurements["fallback_mosaic_coverage_fraction"] == 1.0
 
 
 def test_unwrapper_returns_failure_diagnostics_without_writing_an_image(
@@ -1612,16 +1939,42 @@ def test_unwrap_cli_fails_when_partial_result_has_no_output(monkeypatch: pytest.
     )
     monkeypatch.setattr(cli_module.ObjectUnwrapper, "unwrap_video", lambda self, video, output: missing_output)
 
-    exit_code = unwrap_command(
+    exit_code = cli_module.unwrap_command(
         Namespace(
             surface_kind="auto",
+            publish_profile=None,
+            surface_output_mode=None,
             allow_partial=False,
+            blur_threshold=None,
+            min_object_area_ratio=None,
             sampling_step=12,
             max_frames=48,
             min_coverage=0.9,
             output_width=1536,
             output_height=512,
+            crop_result=False,
+            photo_mode=False,
+            photo_crop_margin_px=None,
+            photo_crop_max_loss=None,
+            photo_crop_max_width_loss=None,
+            save_debug_artifacts=False,
+            no_save_debug_artifacts=False,
+            central_band_ratio=None,
+            max_pose_residual_radians=None,
+            min_accepted_pose_pair_fraction=None,
+            max_mosaic_boundary_mean_error=None,
+            max_mosaic_boundary_severe_fraction=None,
+            mosaic_boundary_severe_error=None,
+            max_mosaic_boundary_severe_footprint=None,
+            no_temporal_decimation=False,
+            temporal_decimation_max_mask_iou=None,
+            temporal_decimation_min_band_difference=None,
+            temporal_decimation_min_bbox_shift=None,
+            min_rectification_column_fraction=None,
+            rectification_smoothing_window=None,
+            max_rectification_axis_step=None,
             no_global_pose_optimization=False,
+            config=None,
             video_path="in.mp4",
             output_path="out.png",
         )
@@ -2094,7 +2447,7 @@ def test_rectification_preserves_owner_boundary_on_anchor_detail() -> None:
     assert np.count_nonzero(anchor_band) > 0
 
 
-def test_cylinder_builder_prefers_baseline_planar_mosaic_over_angular_mosaic(
+def test_cylinder_builder_publishes_inverse_atlas_and_keeps_planar_mosaic_diagnostic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from panoramator.object_unwrap.cylinder import builder as builder_module
@@ -2155,8 +2508,8 @@ def test_cylinder_builder_prefers_baseline_planar_mosaic_over_angular_mosaic(
         UnwrapConfig(surface_kind=SurfaceKind.CYLINDRICAL, output_height=20, output_width=30),
     )
 
-    assert np.array_equal(image, baseline)
-    assert np.array_equal(coverage, baseline_coverage)
+    assert np.array_equal(image, artifacts["inverse_cylindrical"])
+    assert np.array_equal(coverage, artifacts["inverse_cylindrical_coverage"])
     assert np.array_equal(artifacts["mosaic"], baseline)
     assert np.array_equal(artifacts["angular_mosaic"], ghosted)
     assert artifacts["mosaic_boundary"].shape == baseline_coverage.shape
@@ -2165,7 +2518,7 @@ def test_cylinder_builder_prefers_baseline_planar_mosaic_over_angular_mosaic(
     assert artifacts["mosaic_overlap_conflict"].shape == baseline_coverage.shape
     assert artifacts["mosaic_owner_transition"].shape == baseline_coverage.shape
     assert artifacts["mosaic_owner_instability"].shape == baseline_coverage.shape
-    assert measurements["rectification_applied"] == 0
+    assert measurements["primary_renderer"] == "inverse_cylindrical_atlas"
     assert "quality_gate_anchor_conflict_score" in measurements
     assert "quality_gate_owner_instability" in measurements
     assert "quality_gate_saliency_weighted_error" in measurements

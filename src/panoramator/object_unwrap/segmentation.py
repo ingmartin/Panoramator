@@ -39,6 +39,57 @@ def object_mask(image: np.ndarray, min_area_ratio: float = 0.025) -> np.ndarray 
     return result
 
 
+def cylindrical_object_mask(image: np.ndarray, min_area_ratio: float = 0.025) -> np.ndarray | None:
+    """Segment a tall cylindrical wall with a foreground/background seed mask.
+
+    Cylindrical unwrap needs the full visible wall for angular motion and
+    vertical registration.  The generic stable-band mask intentionally trims
+    transient attachments, which is useful for curved objects but can remove
+    too much of a printed cylinder before pose estimation.
+    """
+    height, width = image.shape[:2]
+    if min(height, width) < 80:
+        return object_mask(image, min_area_ratio)
+    scale = min(1.0, 480.0 / max(height, width))
+    small = image if scale == 1.0 else cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    small_height, small_width = small.shape[:2]
+    labels = np.full((small_height, small_width), cv2.GC_BGD, dtype=np.uint8)
+    labels[int(small_height * 0.18) : int(small_height * 0.94), int(small_width * 0.08) : int(small_width * 0.92)] = cv2.GC_PR_FGD
+    labels[int(small_height * 0.32) : int(small_height * 0.86), int(small_width * 0.22) : int(small_width * 0.78)] = cv2.GC_FGD
+    background = np.zeros((1, 65), dtype=np.float64)
+    foreground = np.zeros((1, 65), dtype=np.float64)
+    try:
+        cv2.grabCut(small, labels, None, background, foreground, 1, cv2.GC_INIT_WITH_MASK)
+    except cv2.error:
+        return object_mask(image, min_area_ratio)
+    mask = np.where((labels == cv2.GC_FGD) | (labels == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    image_area = float(small_width * small_height)
+    candidates = []
+    centre = np.array([small_width / 2.0, small_height * 0.58])
+    for contour in contours:
+        area = float(cv2.contourArea(contour))
+        if area < image_area * min_area_ratio:
+            continue
+        x, y, w, h = cv2.boundingRect(contour)
+        if w < small_width * 0.08 or h < small_height * 0.18:
+            continue
+        contour_centre = np.array([x + w / 2.0, y + h / 2.0])
+        centrality = max(0.0, 1.0 - np.linalg.norm(contour_centre - centre) / np.linalg.norm(centre))
+        area_score = min(1.0, area / (image_area * 0.45))
+        candidates.append((area_score * 0.65 + centrality * 0.35, contour))
+    if not candidates:
+        return object_mask(image, min_area_ratio)
+    selected = np.zeros_like(mask)
+    cv2.drawContours(selected, [max(candidates, key=lambda item: item[0])[1]], -1, 255, thickness=cv2.FILLED)
+    if scale != 1.0:
+        selected = cv2.resize(selected, (width, height), interpolation=cv2.INTER_NEAREST)
+    if cv2.countNonZero(selected) < height * width * min_area_ratio:
+        return object_mask(image, min_area_ratio)
+    return selected
+
+
 def masked_sharpness(image: np.ndarray, mask: np.ndarray) -> float:
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     values = cv2.Laplacian(gray, cv2.CV_64F)[mask > 0]

@@ -50,7 +50,7 @@ panoramator build video.mp4 output.png
 ### Построить развёртку поверхности объекта
 
 ```bash
-panoramator unwrap video.mp4 surface.png --surface auto --allow-partial
+panoramator unwrap video.mp4 surface.png --surface cylindrical
 ```
 
 ## Типовые Сценарии
@@ -70,7 +70,7 @@ panoramator build input.mp4 output.png --capture-mode rotation --horizontal-fov-
 ### 3. Обход одного объекта
 
 ```bash
-panoramator unwrap input.mp4 surface.png --surface auto --allow-partial
+panoramator unwrap input.mp4 surface.png --surface cylindrical
 ```
 
 ### 4. Аккуратная обрезка для презентационного результата
@@ -132,8 +132,7 @@ panoramator build input.mp4 output.png --seam-blur-kernel 7 --seam-band-width 9 
 
 ```bash
 panoramator unwrap input.mp4 surface.png \
-  --surface auto \
-  --allow-partial \
+  --surface cylindrical \
   --photo-mode \
   --photo-crop-margin-px 5
 ```
@@ -227,10 +226,68 @@ print(result.diagnostics.output_files)
 python -m pip install -e ".[dev]"
 ```
 
+## Проверка Цилиндрической Развёртки
+
+Для цилиндрического объекта при проверке нужно явно задавать `--surface cylindrical`. Команда ниже сохраняет обычные quality gates и все debug-артефакты, необходимые для проверки результата:
+
+```bash
+panoramator unwrap input.mp4 output/cylinder.png \
+  --surface cylindrical \
+  --publish-profile balanced_publish \
+  --sampling-step 12 \
+  --max-frames 60 \
+  --output-width 1536 \
+  --output-height 512 \
+  --interpolate-gaps \
+  --max-interpolation-gap-px 96 \
+  --save-debug-artifacts
+```
+
+Для быстрого smoke-теста можно уменьшить объём обработки и явно разрешить частичный результат. Редкая выборка вроде `--sampling-step 24 --max-frames 12` намеренно не эквивалентна полному проходу: она может вернуть `unstable_camera_geometry`, а `--allow-partial` не отключает этот geometry safety gate. Если для редкого запуска нужен именно диагностический файл, используйте `--surface-output-mode observed_surface`.
+
+```bash
+panoramator unwrap input.mp4 output/cylinder-smoke.png \
+  --surface cylindrical \
+  --sampling-step 24 \
+  --max-frames 12 \
+  --output-width 768 \
+  --output-height 256 \
+  --surface-output-mode observed_surface \
+  --allow-partial \
+  --save-debug-artifacts
+```
+
+Для cylindrical renderer маска используется как confidence для выбора исходных колонок и проверки геометрии, а не как жёсткий foreground cutout. Поэтому детали текстуры внутри выбранной полосы поверхности (например, уши, контуры и светлые участки рисунка) сохраняются. Короткие внутренние gaps заполняются интерполяцией между наблюдёнными пикселями; большие внешние области кадра по-прежнему не дорисовываются. `curved` использует отдельный путь и эту политику не наследует.
+
+Если в результате остаются мешающие прозрачные полосы, включите дополнительное заполнение ограниченных внутренних gaps:
+
+```bash
+panoramator unwrap input.mp4 output/cylinder-filled.png \
+  --surface cylindrical \
+  --surface-output-mode observed_surface \
+  --interpolate-gaps \
+  --max-interpolation-gap-px 96 \
+  --allow-partial
+```
+
+Интерполяция работает только между двумя наблюдёнными участками в одной строке или колонке. Внешние поля и gaps шире `--max-interpolation-gap-px` остаются прозрачными.
+
+Для полноценной проверки cylindrical unwrap не добавляйте `--allow-partial`. Откройте `output/cylinder_debug/run.json` и проверьте, что `status` равен `ok`, `surface_kind` равен `cylindrical`, а `measurements.rendering` и `measurements.primary_renderer` равны `inverse_cylindrical_atlas`. Дополнительно проверьте `coverage_fraction`, `pose_residual_radians` и количество принятых/отклонённых pose pairs. Файлы `mosaic` и `angular_mosaic` являются диагностикой; итоговая карта поверхности строится основным cylindrical renderer.
+
+Регрессию curved запускайте отдельно на известном видео с криволинейным объектом:
+
+```bash
+panoramator unwrap curved-input.mp4 output/curved.png \
+  --surface curved \
+  --publish-profile balanced_publish \
+  --save-debug-artifacts
+```
+
 ## Тесты
 
 ```bash
-pytest -q
+python -m pytest -q
+python -m pytest -q --cov=panoramator --cov-report=term-missing
 ```
 
 Private acceptance-фикстуры намеренно отделены от стандартного воспроизводимого набора:

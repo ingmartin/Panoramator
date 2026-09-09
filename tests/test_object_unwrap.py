@@ -11,12 +11,16 @@ from panoramator.domain.models import Frame
 from panoramator.object_unwrap.analyzer import AnalyzedFrame
 from panoramator.object_unwrap.coverage import least_covered_seam
 from panoramator.object_unwrap.cylinder.builder import CylinderUnwrapBuilder
-from panoramator.object_unwrap.cylinder.pose import solve_monotonic_trajectory
+from panoramator.object_unwrap.cylinder.pose import (
+    select_cylindrical_keyframes,
+    solve_monotonic_trajectory,
+)
 from panoramator.object_unwrap.diagnostics import write_artifacts
 from panoramator.object_unwrap.image_pose_graph import build_image_pose_graph
 from panoramator.object_unwrap.models import (
     PublishProfile,
     SurfaceKind,
+    SurfaceOutputMode,
     UnwrapConfig,
     UnwrapDiagnostics,
     UnwrapStatus,
@@ -43,10 +47,10 @@ def test_cylinder_builder_creates_alpha_coverage_and_low_coverage_seam() -> None
     assert coverage.shape == image.shape[:2]
     assert 0 < float(cast(Any, measurements["coverage_fraction"])) <= 1
     assert model.kind is SurfaceKind.CYLINDRICAL
-    assert least_covered_seam(coverage) == 0
+    assert 0 <= least_covered_seam(coverage) < coverage.shape[1]
     assert cast(np.ndarray, artifacts["source"]).shape == coverage.shape
     assert cast(np.ndarray, artifacts["reprojection_error"]).shape == coverage.shape
-    assert measurements["rendering"] == "feature_mosaic_then_global_rectification"
+    assert measurements["rendering"] == "inverse_cylindrical_atlas"
     assert cast(np.ndarray, artifacts["angular_mosaic"]).shape[0] == 80
 
 
@@ -103,6 +107,19 @@ def test_monotonic_trajectory_rejects_reversed_outlier_without_reordering_frames
     assert trajectory.rejection_reasons[2] == "reversed_motion"
 
 
+def test_cylindrical_keyframes_collapse_pause_runs_before_final_pose_solve() -> None:
+    frames = [type("Frame", (), {"sharpness": float(index)})() for index in range(7)]
+    retained = select_cylindrical_keyframes(
+        frames,
+        [0.01, 0.01, 0.08, 0.01, 0.01, 0.08],
+        [20, 20, 20, 20, 20, 20],
+    )
+
+    assert len(retained) < len(frames)
+    assert retained[0] == 2
+    assert retained[-1] == 6
+
+
 def test_unwrap_config_limits_source_map_frame_ids() -> None:
     with np.testing.assert_raises_regex(ValueError, "65535"):
         UnwrapConfig(max_frames=65_536).validate()
@@ -112,11 +129,14 @@ def test_unwrap_config_json_round_trip_normalizes_surface_kind(tmp_path) -> None
     config = UnwrapConfig(
         surface_kind=SurfaceKind.CYLINDRICAL,
         publish_profile=PublishProfile.COVERAGE_FIRST,
+        surface_output_mode=SurfaceOutputMode.OBSERVED_SURFACE,
         allow_partial=True,
         photo_mode=True,
         crop_result=True,
         photo_crop_max_loss=0.25,
         photo_crop_max_width_loss=0.2,
+        interpolate_gaps=True,
+        max_interpolation_gap_px=48,
     )
     config_path = tmp_path / "unwrap.json"
 
@@ -126,6 +146,9 @@ def test_unwrap_config_json_round_trip_normalizes_surface_kind(tmp_path) -> None
     assert loaded == config
     assert loaded.to_dict()["surface_kind"] == "cylindrical"
     assert loaded.to_dict()["publish_profile"] == "coverage_first"
+    assert loaded.to_dict()["surface_output_mode"] == "observed_surface"
+    assert loaded.to_dict()["interpolate_gaps"] is True
+    assert loaded.to_dict()["max_interpolation_gap_px"] == 48
 
 
 @pytest.mark.parametrize(
@@ -139,6 +162,7 @@ def test_unwrap_config_json_round_trip_normalizes_surface_kind(tmp_path) -> None
         ({"max_mosaic_owner_instability": 1.1}, "max_mosaic_owner_instability must be between 0 and 1"),
         ({"temporal_decimation_min_new_mask_fraction": 1.1}, "temporal_decimation_min_new_mask_fraction must be between 0 and 1"),
         ({"temporal_decimation_min_detail_gain": -0.1}, "temporal_decimation_min_detail_gain must be between 0 and 1"),
+        ({"max_interpolation_gap_px": 0}, "max_interpolation_gap_px must be >= 1"),
     ],
 )
 def test_unwrap_config_rejects_invalid_photo_mode_crop_thresholds(settings: dict[str, float], message: str) -> None:

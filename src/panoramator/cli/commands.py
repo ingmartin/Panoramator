@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from panoramator.config.models import PanoramaConfig
-from panoramator.object_unwrap import PublishProfile, SurfaceKind, UnwrapConfig
+from panoramator.object_unwrap import (
+    PublishProfile,
+    SurfaceKind,
+    SurfaceOutputMode,
+    UnwrapConfig,
+)
 
 ApplyPredicate = Callable[[argparse.Namespace, str], bool]
 ValueFactory = Callable[[argparse.Namespace, str], object]
@@ -43,7 +48,7 @@ def _literal_value(value: object) -> ValueFactory:
     return lambda _args, _dest: value
 
 
-def _enum_value(enum_type: type[SurfaceKind] | type[PublishProfile]) -> ValueFactory:
+def _enum_value(enum_type: type[SurfaceKind] | type[PublishProfile] | type[SurfaceOutputMode]) -> ValueFactory:
     return lambda args, dest: enum_type(getattr(args, dest))
 
 
@@ -313,6 +318,19 @@ UNWRAP_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         value_factory=_enum_value(PublishProfile),
     ),
     ArgumentSpec(
+        ("--surface-output-mode",),
+        {
+            "choices": [mode.value for mode in SurfaceOutputMode],
+            "help": (
+                "Publication policy for the saved output: confirmed_geometry keeps the current "
+                "geometry-confirmation rules; observed_surface allows publishing an observed surface band "
+                "without claiming one confirmed cylindrical geometry."
+            ),
+        },
+        config_attr="surface_output_mode",
+        value_factory=_enum_value(SurfaceOutputMode),
+    ),
+    ArgumentSpec(
         ("--allow-partial",),
         {"action": "store_true", "help": "Allow partial output when full surface coverage is not available"},
         config_attr="allow_partial",
@@ -330,6 +348,18 @@ UNWRAP_ARGUMENTS: tuple[ArgumentSpec, ...] = (
     ArgumentSpec(("--min-coverage",), {"type": float, "help": "Minimum coverage required for a successful unwrap"}, config_attr="min_coverage"),
     ArgumentSpec(("--output-width",), {"type": int, "help": "Output surface width in pixels"}, config_attr="output_width"),
     ArgumentSpec(("--output-height",), {"type": int, "help": "Output surface height in pixels"}, config_attr="output_height"),
+    ArgumentSpec(
+        ("--interpolate-gaps",),
+        {"action": "store_true", "help": "Fill bounded transparent gaps by interpolation"},
+        config_attr="interpolate_gaps",
+        should_apply=_flag_enabled,
+        value_factory=_literal_value(True),
+    ),
+    ArgumentSpec(
+        ("--max-interpolation-gap-px",),
+        {"type": int, "help": "Maximum transparent gap width/height to interpolate"},
+        config_attr="max_interpolation_gap_px",
+    ),
     ArgumentSpec(
         ("--crop-result",),
         {"action": "store_true", "help": "Crop empty margins from the final surface image"},

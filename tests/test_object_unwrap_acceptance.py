@@ -4,10 +4,16 @@ from typing import cast
 
 import cv2
 import numpy as np
+import pytest
 
 from panoramator.domain.models import Frame
 from panoramator.object_unwrap.analyzer import AnalyzedFrame
 from panoramator.object_unwrap.cylinder.builder import CylinderUnwrapBuilder
+from panoramator.object_unwrap.cylinder.renderer import (
+    _select_single_cycle,
+    render_adaptive_slit_cylindrical_atlas,
+    render_inverse_cylindrical_atlas,
+)
 from panoramator.object_unwrap.models import PublishProfile, UnwrapConfig
 from panoramator.object_unwrap.planar_mosaic import build_planar_mosaic
 from panoramator.object_unwrap.rectification import evaluate_mosaic_quality
@@ -20,6 +26,109 @@ def _reference_texture() -> np.ndarray:
     cv2.ellipse(image, (98, 32), (30, 20), 0, 0, 360, (25, 35, 230), 3)
     cv2.putText(image, "UV", (72, 44), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (10, 220, 40), 2, cv2.LINE_AA)
     return image
+
+
+def test_inverse_cylindrical_renderer_owns_columns_without_temporal_averaging() -> None:
+    frames: list[AnalyzedFrame] = []
+    for index in range(5):
+        image = np.full((72, 120, 3), (20 + index * 35, 80, 160), np.uint8)
+        mask = np.full((72, 120), 255, np.uint8)
+        frames.append(
+            AnalyzedFrame(
+                Frame(index, float(index), image),
+                mask,
+                mask.copy(),
+                100.0 + index,
+                (0, 0, 120, 72),
+            )
+        )
+
+    image, coverage, source, error, measurements = render_inverse_cylindrical_atlas(
+        frames,
+        np.linspace(0.0, 2.4, len(frames)).tolist(),
+        output_height=64,
+        output_width=240,
+    )
+
+    assert image.shape == (64, 240, 3)
+    assert coverage.shape == source.shape == error.shape == (64, 240)
+    assert float(np.mean(coverage > 0)) > 0.5
+    assert measurements["inverse_cylindrical_valid_columns"] > 0
+    occupied = image[coverage > 0]
+    allowed = {(20 + index * 35, 80, 160) for index in range(5)}
+    assert {tuple(pixel) for pixel in occupied} <= allowed
+    assert set(np.unique(source[coverage > 0])).issubset(set(range(1, 6)))
+
+
+def test_inverse_cylindrical_renderer_rejects_mismatched_inputs() -> None:
+    with pytest.raises(ValueError, match="equal length"):
+        render_inverse_cylindrical_atlas([], [0.0], 32, 64)
+
+
+def test_inverse_cylindrical_renderer_handles_a_complete_cycle_and_moves_seam() -> None:
+    image = np.full((48, 80, 3), 120, np.uint8)
+    mask = np.full((48, 80), 255, np.uint8)
+    frames = [
+        AnalyzedFrame(Frame(index, float(index), image.copy()), mask, mask.copy(), 50.0, (0, 0, 80, 48))
+        for index in range(5)
+    ]
+
+    rendered, coverage, source, _error, measurements = render_inverse_cylindrical_atlas(
+        frames,
+        np.linspace(0.0, 2.0 * np.pi, len(frames)).tolist(),
+        output_height=40,
+        output_width=160,
+    )
+
+    assert rendered.shape == (40, 160, 3)
+    assert np.any(coverage > 0)
+    assert np.any(source > 0)
+    assert measurements["inverse_cylindrical_full_cycle"] == 1
+
+
+def test_cylindrical_renderer_drops_the_tail_after_one_revolution() -> None:
+    image = np.zeros((32, 48, 3), np.uint8)
+    mask = np.full((32, 48), 255, np.uint8)
+    frames = [
+        AnalyzedFrame(Frame(index, float(index), image), mask, mask.copy(), 50.0, (0, 0, 48, 32))
+        for index in range(7)
+    ]
+    selected, angles, _offsets = _select_single_cycle(
+        frames,
+        [0.0, -1.0, -2.0, -3.0, -4.0, -5.0, -6.4],
+        None,
+    )
+
+    assert len(selected) == 6
+    assert angles[-1] == -5.0
+
+
+def test_adaptive_slit_renderer_publishes_one_owner_per_surface_column() -> None:
+    frames: list[AnalyzedFrame] = []
+    for index in range(5):
+        image = np.full((72, 120, 3), (20 + index * 35, 80, 160), np.uint8)
+        mask = np.full((72, 120), 255, np.uint8)
+        frames.append(
+            AnalyzedFrame(
+                Frame(index, float(index), image),
+                mask,
+                mask.copy(),
+                100.0,
+                (0, 0, 120, 72),
+            )
+        )
+
+    image, coverage, source, _error, measurements = render_adaptive_slit_cylindrical_atlas(
+        frames,
+        np.linspace(0.0, 2.0 * np.pi, len(frames)).tolist(),
+        output_height=64,
+        output_width=240,
+    )
+
+    assert image.shape == (64, 240, 3)
+    assert float(np.mean(coverage > 0)) > 0.8
+    assert measurements["inverse_cylindrical_adaptive_slit"] == 1
+    assert set(np.unique(source[coverage > 0])).issubset(set(range(1, 6)))
 
 
 def test_feature_mosaic_preserves_continuous_reference_across_source_boundaries() -> None:

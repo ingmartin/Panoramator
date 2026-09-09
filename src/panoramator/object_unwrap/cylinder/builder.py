@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import itertools
+from dataclasses import replace
 
-import cv2
 import numpy as np
 
 from ..analyzer import AnalyzedFrame
 from ..coverage import coverage_fraction, least_covered_seam
-from ..image_pose_graph import build_image_pose_graph
+from ..image_pose_graph import ImagePoseGraph, build_image_pose_graph
 from ..models import SurfaceModel, UnwrapConfig
 from ..planar_mosaic import build_planar_mosaic
 from ..rectification import estimate_strip, evaluate_mosaic_quality, rectify_mosaic
@@ -15,12 +15,20 @@ from .fitting import fit_cylinder
 from .mapper import (
     angular_increment,
     central_band,
+    cylindrical_motion_increment,
     feature_shift,
     flow_angular_increment,
     horizontal_shift,
     normalized_wall,
 )
-from .pose import solve_monotonic_trajectory
+from .pose import (
+    accumulate_vertical_offsets,
+    select_cylindrical_keyframes,
+    smooth_cylindrical_steps,
+    solve_monotonic_trajectory,
+    stabilize_motion_steps,
+)
+from .renderer import render_adaptive_slit_cylindrical_atlas
 
 
 class CylinderUnwrapBuilder:
@@ -29,43 +37,110 @@ class CylinderUnwrapBuilder:
     ) -> tuple[
         np.ndarray, np.ndarray, SurfaceModel, dict[str, float | int | str | list[float] | list[int]], dict[str, object]
     ]:
-        fit = fit_cylinder(frames)
-        image_pose_graph = build_image_pose_graph(frames)
-        planar_mosaic = build_planar_mosaic(
-            frames,
-            image_pose_graph.edges,
-            config.output_height,
-            config.publish_profile,
-        )
-        fragments = [
-            central_band(
-                *normalized_wall(item.frame.image, item.publish_mask, item.bbox, config.output_height),
-                config.central_band_ratio,
-            )
-            for item in frames
-        ]
+        fit = None
+        image_pose_graph = None
+        planar_mosaic = None
+        fragments: list[tuple[np.ndarray, np.ndarray]] = []
+        if not config.enable_global_pose_optimization:
+            fragments = [
+                central_band(
+                    *normalized_wall(item.frame.image, item.publish_mask, item.bbox, config.output_height),
+                    config.central_band_ratio,
+                )
+                for item in frames
+            ]
         half_view_angle = float(np.arcsin(config.central_band_ratio))
         observations: list[tuple[float, float]] = []
-        for (previous, previous_mask), (current, current_mask) in itertools.pairwise(fragments):
+        vertical_deltas: list[float] = []
+        motion_matches: list[int] = []
+        motion_inliers: list[int] = []
+        for index, (previous, current) in enumerate(itertools.pairwise(frames)):
             if config.enable_global_pose_optimization:
-                step, response = flow_angular_increment(previous, previous_mask, current, config.central_band_ratio)
-                if response < 0.35:
-                    step, response = angular_increment(previous, previous_mask, current, current_mask, config.central_band_ratio)
+                step, response, vertical_delta, match_count, inlier_count = cylindrical_motion_increment(
+                    previous.frame.image,
+                    current.frame.image,
+                    previous.geometry_mask,
+                    current.geometry_mask,
+                    previous.bbox,
+                    current.bbox,
+                )
             else:
-                step, response = angular_increment(previous, previous_mask, current, current_mask, config.central_band_ratio)
+                previous_fragment, previous_fragment_mask = fragments[index]
+                current_fragment, current_fragment_mask = fragments[index + 1]
+                step, response = angular_increment(
+                    previous_fragment,
+                    previous_fragment_mask,
+                    current_fragment,
+                    current_fragment_mask,
+                    config.central_band_ratio,
+                )
                 if response < 0.25:
-                    shift, fallback_response = feature_shift(previous, previous_mask, current, current_mask)
+                    shift, fallback_response = feature_shift(
+                        previous_fragment,
+                        previous_fragment_mask,
+                        current_fragment,
+                        current_fragment_mask,
+                    )
                     if fallback_response >= 0.25:
-                        step = float(-shift / max(previous.shape[1], 1) * 2.0 * half_view_angle)
+                        step = float(-shift / max(previous_fragment.shape[1], 1) * 2.0 * half_view_angle)
                         response = fallback_response
                     else:
-                        shift, response = horizontal_shift(previous, current)
+                        shift, response = horizontal_shift(previous_fragment, current_fragment)
                         step = float(-shift / 256.0 * half_view_angle)
+                vertical_delta = 0.0
+                match_count = 0
+                inlier_count = 0
             observations.append((step, response))
+            vertical_deltas.append(vertical_delta)
+            motion_matches.append(match_count)
+            motion_inliers.append(inlier_count)
         responses = [response for _, response in observations]
         if config.enable_global_pose_optimization:
-            trajectory = solve_monotonic_trajectory(observations)
-            angles, steps = trajectory.angles, trajectory.steps
+            dense_steps = smooth_cylindrical_steps(
+                stabilize_motion_steps([step for step, _ in observations])
+            )
+            dense_angles = [0.0]
+            for step in dense_steps:
+                dense_angles.append(dense_angles[-1] + step)
+            retained_indices = select_cylindrical_keyframes(
+                frames, dense_steps, motion_inliers
+            )
+            selected_angles = [dense_angles[index] for index in retained_indices]
+            if len(retained_indices) >= 2 and len(retained_indices) < len(frames):
+                frames = [frames[index] for index in retained_indices]
+                observations = []
+                vertical_deltas = []
+                motion_matches = []
+                motion_inliers = []
+                for previous, current in itertools.pairwise(frames):
+                    step, response, vertical_delta, match_count, inlier_count = cylindrical_motion_increment(
+                        previous.frame.image,
+                        current.frame.image,
+                        previous.geometry_mask,
+                        current.geometry_mask,
+                        previous.bbox,
+                        current.bbox,
+                    )
+                    observations.append((step, response))
+                    vertical_deltas.append(vertical_delta)
+                    motion_matches.append(match_count)
+                    motion_inliers.append(inlier_count)
+            stabilized_steps = smooth_cylindrical_steps(
+                stabilize_motion_steps([step for step, _ in observations])
+            )
+            stabilized_observations = list(
+                zip(stabilized_steps, [response for _, response in observations], strict=True)
+            )
+            trajectory = solve_monotonic_trajectory(stabilized_observations)
+            angles = selected_angles if len(selected_angles) == len(frames) else trajectory.angles
+            steps = [right - left for left, right in itertools.pairwise(angles)]
+            trajectory = replace(
+                trajectory,
+                angles=angles,
+                steps=steps,
+                sweep_radians=abs(angles[-1] - angles[0]),
+                repeated_observation=abs(angles[-1] - angles[0]) > 2.0 * np.pi * 1.05,
+            )
             pose_residual = trajectory.residual_radians
         else:
             raw_steps = [step for step, _ in observations]
@@ -78,60 +153,47 @@ class CylinderUnwrapBuilder:
                 angles.append(angles[-1] + step)
             pose_residual = 0.0
             trajectory = None
+        fit = fit_cylinder(frames)
+        if len(frames) > 60:
+            image_pose_graph = ImagePoseGraph([])
+            planar_mosaic = None
+        else:
+            image_pose_graph = build_image_pose_graph(frames)
+            planar_mosaic = build_planar_mosaic(
+                frames,
+                image_pose_graph.edges,
+                config.output_height,
+                config.publish_profile,
+            )
+        fragments = [
+            central_band(
+                *normalized_wall(item.frame.image, item.publish_mask, item.bbox, config.output_height),
+                config.central_band_ratio,
+            )
+            for item in frames
+        ]
         min_angle = min(angles) - half_view_angle
         max_angle = max(angles) + half_view_angle
         angle_span = max(max_angle - min_angle, 1e-6)
         atlas_width, pixels_per_radian = self._atlas_width(fit.boxes, angle_span, config)
-        canvas = np.zeros((config.output_height, atlas_width, 3), np.uint8)
-        weights = np.zeros((config.output_height, atlas_width), np.float32)
-        artifacts: dict[str, object] = {}
-        # A pixel-owner map makes the selected source explicit.  Zero means an
-        # unobserved pixel; frame numbers are stored one-based so it is suitable
-        # for a lossless grayscale PNG.
-        source_map = np.zeros((config.output_height, atlas_width), np.uint16)
-        local_error = np.zeros((config.output_height, atlas_width), np.float32)
-        target_angles = np.linspace(min_angle, max_angle, atlas_width, dtype=np.float32)
-        for frame_offset, (item, (_, _), angle) in enumerate(zip(frames, fragments, angles, strict=True), start=1):
-            local_angles = target_angles - angle
-            visible = np.abs(local_angles) <= half_view_angle
-            # Orthographic cylindrical projection: x / r = sin(theta).  The
-            # inverse mapping preserves the geometry of the observed texture
-            # instead of linearly stretching each source strip.
-            x, y, width, height = item.bbox
-            axis_x = x + (width - 1) * 0.5
-            radius = max((width - 1) * 0.5, 1.0)
-            # Each source view has its own fitted axis, radius and vertical
-            # interval.  This avoids stretching a view to another view's box.
-            map_x_row = (axis_x + radius * np.sin(local_angles)).astype(np.float32)
-            map_x_row[~visible] = -1.0
-            map_x = np.repeat(map_x_row[None, :], config.output_height, axis=0)
-            source_y = np.linspace(y, y + height - 1, config.output_height, dtype=np.float32)
-            source_map_y = np.repeat(source_y[:, None], atlas_width, axis=1)
-            mapped_image = cv2.remap(item.frame.image, map_x, source_map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
-            mapped_mask = cv2.remap(item.publish_mask, map_x, source_map_y, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT)
-            column_weights = np.cos(local_angles).astype(np.float32)
-            column_weights[~visible] = 0.0
-            for target_x in np.flatnonzero(visible):
-                valid = mapped_mask[:, target_x] > 0
-                competing = valid & (weights[:, target_x] > 0)
-                if np.any(competing):
-                    difference = np.mean(
-                        np.abs(
-                            canvas[competing, target_x].astype(np.float32)
-                            - mapped_image[competing, target_x].astype(np.float32)
-                        ),
-                        axis=1,
-                    )
-                    local_error[competing, target_x] = np.maximum(local_error[competing, target_x], difference)
-                replace = valid & (column_weights[target_x] > weights[:, target_x])
-                canvas[replace, target_x] = mapped_image[replace, target_x]
-                weights[replace, target_x] = column_weights[target_x]
-                source_map[replace, target_x] = frame_offset
-        coverage = np.where(weights > 0, 255, 0).astype(np.uint8)
+        canvas, coverage, source_map, local_error, inverse_measurements = render_adaptive_slit_cylindrical_atlas(
+            frames,
+            angles,
+            config.output_height,
+            atlas_width,
+            accumulate_vertical_offsets(vertical_deltas),
+            config.interpolate_gaps,
+            config.max_interpolation_gap_px,
+        )
+        artifacts: dict[str, object] = {
+            "inverse_cylindrical": canvas.copy(),
+            "inverse_cylindrical_coverage": coverage.copy(),
+            "inverse_cylindrical_source": source_map.copy(),
+            "inverse_cylindrical_error": local_error.copy(),
+        }
         if trajectory is not None and planar_mosaic is not None:
-            # Publish only the baseline image-space mosaic built from the same
-            # graph transforms. The angular strip composer remains diagnostic
-            # only; it is exactly the path that produced visible ghosting.
+            # Keep image-space mosaics for diagnostics and quality gates. The
+            # inverse cylindrical atlas above is the only published renderer.
             mosaic, mosaic_coverage, mosaic_source, mosaic_error = planar_mosaic
             gate = evaluate_mosaic_quality(
                 mosaic,
@@ -178,7 +240,7 @@ class CylinderUnwrapBuilder:
                     max_axis_step=config.max_rectification_axis_step,
                 )
                 if strip is not None:
-                    canvas, coverage, source_map, reprojection_error = rectify_mosaic(
+                    rectified, rectified_coverage, rectified_source, reprojection_error = rectify_mosaic(
                         mosaic,
                         mosaic_coverage,
                         mosaic_source,
@@ -187,7 +249,10 @@ class CylinderUnwrapBuilder:
                         config.output_height,
                         config.output_width,
                     )
-                    local_error = reprojection_error.astype(np.float32)
+                    artifacts["rectified_mosaic"] = rectified
+                    artifacts["rectified_mosaic_coverage"] = rectified_coverage
+                    artifacts["rectified_mosaic_source"] = rectified_source
+                    artifacts["rectified_mosaic_error"] = reprojection_error
                     measurements = {
                         **gate.measurements,
                         **strip.measurements,
@@ -195,12 +260,10 @@ class CylinderUnwrapBuilder:
                         "publish_profile": config.publish_profile.value,
                     }
                 else:
-                    canvas, coverage, source_map = mosaic, mosaic_coverage, mosaic_source
-                    local_error = mosaic_error.astype(np.float32)
+                    artifacts["mosaic_error"] = mosaic_error
                     measurements = {**gate.measurements, "rectification_applied": 0, "publish_profile": config.publish_profile.value}
             else:
-                canvas, coverage, source_map = mosaic, mosaic_coverage, mosaic_source
-                local_error = mosaic_error.astype(np.float32)
+                artifacts["mosaic_error"] = mosaic_error
                 measurements = {**gate.measurements, "rectification_applied": 0, "publish_profile": config.publish_profile.value}
         else:
             measurements = {"quality_gate_passed": 0, "rectification_applied": 0, "publish_profile": config.publish_profile.value}
@@ -259,6 +322,8 @@ class CylinderUnwrapBuilder:
             "atlas_width": atlas_width,
             "pixels_per_radian": pixels_per_radian,
             "match_response": responses,
+            "feature_matches": motion_matches,
+            "feature_inliers": motion_inliers,
             "angular_steps": steps,
             "pose_residual_radians": pose_residual,
             "accepted_pose_pairs": (trajectory.accepted_pairs if trajectory else 0),
@@ -266,11 +331,14 @@ class CylinderUnwrapBuilder:
             "trajectory_sweep_degrees": (
                 trajectory.sweep_radians / (2.0 * np.pi) * 360.0 if trajectory else 0.0
             ),
+            "pose_frame_count": len(frames),
             "repeated_observation_detected": (
                 int(trajectory.repeated_observation) if trajectory else 0
             ),
             "mapping": "surface_angle_height",
-            "rendering": "feature_mosaic_then_global_rectification" if trajectory is not None else "experimental_frame_projection",
+            "rendering": "inverse_cylindrical_atlas",
+            "primary_renderer": "inverse_cylindrical_atlas",
+            **inverse_measurements,
             "image_pose_graph_edges": len(image_pose_graph.edges),
             "image_pose_graph_valid_edges": image_pose_graph.valid_edges,
             "planar_mosaic_available": int(planar_mosaic is not None),

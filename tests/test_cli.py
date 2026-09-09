@@ -14,6 +14,7 @@ from panoramator.domain.models import PanoramaDiagnostics, PanoramaResult, Video
 from panoramator.object_unwrap.models import (
     PublishProfile,
     SurfaceKind,
+    SurfaceOutputMode,
     UnwrapConfig,
     UnwrapDiagnostics,
     UnwrapResult,
@@ -89,6 +90,7 @@ def _unwrap_args(**overrides) -> argparse.Namespace:
         "config": None,
         "surface_kind": "auto",
         "publish_profile": None,
+        "surface_output_mode": None,
         "allow_partial": False,
         "sampling_step": None,
         "max_frames": None,
@@ -97,6 +99,8 @@ def _unwrap_args(**overrides) -> argparse.Namespace:
         "min_coverage": None,
         "output_width": None,
         "output_height": None,
+        "interpolate_gaps": False,
+        "max_interpolation_gap_px": None,
         "crop_result": False,
         "photo_mode": False,
         "photo_crop_margin_px": None,
@@ -275,7 +279,10 @@ def test_unwrap_command_applies_overrides_and_prints_summary(monkeypatch, capsys
         config="unwrap.json",
         surface_kind="curved",
         publish_profile="coverage_first",
+        surface_output_mode="observed_surface",
         allow_partial=True,
+        interpolate_gaps=True,
+        max_interpolation_gap_px=48,
         sampling_step=18,
         max_frames=24,
         blur_threshold=40.0,
@@ -313,7 +320,10 @@ def test_unwrap_command_applies_overrides_and_prints_summary(monkeypatch, capsys
     config = captured["config"]
     assert config.surface_kind is SurfaceKind.CURVED
     assert config.publish_profile is PublishProfile.COVERAGE_FIRST
+    assert config.surface_output_mode is SurfaceOutputMode.OBSERVED_SURFACE
     assert config.allow_partial is True
+    assert config.interpolate_gaps is True
+    assert config.max_interpolation_gap_px == 48
     assert config.sampling_step == 18
     assert config.max_frames == 24
     assert config.blur_threshold == 40.0
@@ -353,6 +363,40 @@ def test_unwrap_command_applies_overrides_and_prints_summary(monkeypatch, capsys
 def test_unwrap_command_validates_cli_overrides() -> None:
     with pytest.raises(ValueError, match="min_object_area_ratio must be between 0 and 1"):
         cli_main.unwrap_command(_unwrap_args(min_object_area_ratio=0.0))
+
+
+def test_unwrap_command_returns_success_for_observed_surface_output(monkeypatch, capsys) -> None:
+    class _ObservedSurfaceUnwrapper:
+        def __init__(self, config: UnwrapConfig) -> None:
+            self.config = config
+
+        def unwrap_video(self, video_path: str, output_path: str) -> UnwrapResult:
+            diagnostics = UnwrapDiagnostics(
+                UnwrapStatus.OBSERVED_SURFACE,
+                "An observed surface band was published without claiming one confirmed cylindrical geometry.",
+                "",
+                SurfaceKind.CURVED,
+                measurements={
+                    "publication_mode": "observed_surface",
+                    "geometry_confirmation": "not_confirmed",
+                    "surface_output_intent": "observed_surface",
+                },
+            )
+            return UnwrapResult(
+                image=None,
+                coverage=None,
+                model=None,
+                diagnostics=diagnostics,
+                output_path=Path(output_path),
+            )
+
+    monkeypatch.setattr(cli_main, "ObjectUnwrapper", _ObservedSurfaceUnwrapper)
+
+    result = cli_main.unwrap_command(_unwrap_args(surface_output_mode="observed_surface"))
+
+    assert result == 0
+    output = capsys.readouterr().out
+    assert "Status: observed_surface" in output
 
 
 def test_inspect_video_command_prints_metadata(monkeypatch, capsys) -> None:
@@ -412,6 +456,7 @@ def test_create_parser_routes_supported_subcommands() -> None:
             "unwrap", "video.mp4", "out.png", "--config", "unwrap.json", "--sampling-step", "18", "--max-frames", "24",
             "--publish-profile", "conservative_publish", "--blur-threshold", "40", "--min-object-area-ratio", "0.1",
             "--crop-result", "--photo-mode", "--photo-crop-margin-px", "5",
+            "--interpolate-gaps", "--max-interpolation-gap-px", "48",
             "--max-mosaic-boundary-mean-error", "52", "--no-save-debug-artifacts",
         ]
     )
@@ -433,6 +478,8 @@ def test_create_parser_routes_supported_subcommands() -> None:
     assert unwrap_args.blur_threshold == 40.0
     assert unwrap_args.min_object_area_ratio == 0.1
     assert unwrap_args.crop_result is True
+    assert unwrap_args.interpolate_gaps is True
+    assert unwrap_args.max_interpolation_gap_px == 48
     assert unwrap_args.photo_mode is True
     assert unwrap_args.photo_crop_margin_px == 5
     assert unwrap_args.no_save_debug_artifacts is True
@@ -571,6 +618,7 @@ def test_apply_unwrap_overrides_maps_enum_and_boolean_values() -> None:
     args = _unwrap_args(
         surface_kind="curved",
         publish_profile="coverage_first",
+        surface_output_mode="observed_surface",
         allow_partial=True,
         no_temporal_decimation=True,
         no_global_pose_optimization=True,
@@ -580,6 +628,7 @@ def test_apply_unwrap_overrides_maps_enum_and_boolean_values() -> None:
 
     assert config.surface_kind is SurfaceKind.CURVED
     assert config.publish_profile is PublishProfile.COVERAGE_FIRST
+    assert config.surface_output_mode is SurfaceOutputMode.OBSERVED_SURFACE
     assert config.allow_partial is True
     assert config.enable_temporal_decimation is False
     assert config.enable_global_pose_optimization is False

@@ -105,6 +105,25 @@ def test_preserve_alpha_crop_keeps_visible_mask() -> None:
     assert np.all(cropped[..., 3] == 255)
 
 
+def test_preserve_alpha_crop_keeps_all_disconnected_atlas_segments() -> None:
+    image = np.full((6, 24, 3), 200, dtype=np.uint8)
+    mask = np.zeros((6, 24), dtype=np.uint8)
+    mask[1:5, 1:5] = 255
+    mask[1:5, 18:23] = 255
+
+    cropped, policy, _ = crop_with_policy(
+        image,
+        mask,
+        "preserve_alpha",
+        max_inscribed_loss=0.5,
+        max_inscribed_width_loss=0.5,
+    )
+
+    assert policy == "preserve_alpha"
+    assert cropped.shape == (4, 22, 4)
+    assert np.count_nonzero(cropped[..., 3] == 255) == 4 * (4 + 5)
+
+
 def test_rotation_stabilization_preserves_horizontal_panorama_extent() -> None:
     pairs = [
         np.array([[1.0, -0.03, 20.0], [0.03, 1.0, 2.0], [0.0, 0.0, 1.0]]),

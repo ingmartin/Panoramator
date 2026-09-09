@@ -1,3 +1,7 @@
-from .builder import CurvedSurfaceFallbackBuilder
+from .builder import (
+    CurvedSurfaceBuild,
+    CurvedSurfaceBuilder,
+    CurvedSurfaceFallbackBuilder,
+)
 
-__all__ = ["CurvedSurfaceFallbackBuilder"]
+__all__ = ["CurvedSurfaceBuild", "CurvedSurfaceBuilder", "CurvedSurfaceFallbackBuilder"]

@@ -17,8 +17,11 @@ def crop_with_policy(
     """Apply a projection-aware crop policy and report any safety fallback."""
     if policy == "preserve_alpha":
         mask = _resolve_visible_mask(image, visible_mask)
-        bounding = crop_black_borders(image, mask)
-        x, y, width, height = _bounding_rect(mask)
+        # Preserve the complete observed atlas.  Using the largest external
+        # contour here drops later panorama segments when transparent gaps
+        # split the owner mask into multiple real observations.
+        x, y, width, height = _all_visible_bounds(mask)
+        bounding = image[y : y + height, x : x + width]
         alpha = mask[y : y + height, x : x + width]
         if bounding.ndim == 3 and bounding.shape[2] == 3:
             return np.dstack((bounding, alpha)), policy, 0.0
@@ -65,6 +68,18 @@ def _bounding_rect(mask: np.ndarray) -> tuple[int, int, int, int]:
         return 0, 0, mask.shape[1], mask.shape[0]
     x, y, width, height = cv2.boundingRect(max(contours, key=cv2.contourArea))
     return int(x), int(y), int(width), int(height)
+
+
+def _all_visible_bounds(mask: np.ndarray) -> tuple[int, int, int, int]:
+    visible = np.flatnonzero(mask > 0)
+    if visible.size == 0:
+        return 0, 0, mask.shape[1], mask.shape[0]
+    ys, xs = np.where(mask > 0)
+    left = int(xs.min())
+    top = int(ys.min())
+    right = int(xs.max()) + 1
+    bottom = int(ys.max()) + 1
+    return left, top, right - left, bottom - top
 
 
 def crop_to_visible_area(image: np.ndarray, visible_mask: np.ndarray | None = None) -> np.ndarray:

@@ -4,6 +4,65 @@ import cv2
 import numpy as np
 
 
+def cylindrical_motion_increment(
+    previous: np.ndarray,
+    current: np.ndarray,
+    previous_mask: np.ndarray,
+    current_mask: np.ndarray,
+    previous_bbox: tuple[int, int, int, int],
+    current_bbox: tuple[int, int, int, int],
+) -> tuple[float, float, float, int, int]:
+    """Estimate cylindrical motion from masked, object-local inliers.
+
+    The estimate uses the complete detected object rather than only the
+    central strip.  This keeps textured surface details available while the
+    RANSAC homography rejects background matches before the angular increment
+    is accumulated.
+    """
+    previous_gray = cv2.cvtColor(previous, cv2.COLOR_BGR2GRAY)
+    current_gray = cv2.cvtColor(current, cv2.COLOR_BGR2GRAY)
+    scale = min(1.0, 480.0 / max(previous_gray.shape[:2]))
+    if scale < 1.0:
+        previous_gray = cv2.resize(previous_gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        current_gray = cv2.resize(current_gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    previous_feature_mask = cv2.resize(
+        previous_mask, (previous_gray.shape[1], previous_gray.shape[0]), interpolation=cv2.INTER_NEAREST
+    )
+    current_feature_mask = cv2.resize(
+        current_mask, (current_gray.shape[1], current_gray.shape[0]), interpolation=cv2.INTER_NEAREST
+    )
+    detector = cv2.SIFT_create(nfeatures=800) if hasattr(cv2, "SIFT_create") else cv2.ORB_create(nfeatures=800, fastThreshold=12)  # type: ignore[attr-defined]
+    key_previous, descriptors_previous = detector.detectAndCompute(previous_gray, previous_feature_mask)
+    key_current, descriptors_current = detector.detectAndCompute(current_gray, current_feature_mask)
+    if descriptors_previous is None or descriptors_current is None or len(key_previous) < 4 or len(key_current) < 4:
+        return 0.0, 0.0, 0.0, 0, 0
+    norm = cv2.NORM_L2 if descriptors_previous.dtype == np.float32 else cv2.NORM_HAMMING
+    pairs = cv2.BFMatcher(norm).knnMatch(descriptors_previous, descriptors_current, k=2)
+    good = [pair[0] for pair in pairs if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance]
+    if len(good) < 4:
+        return 0.0, 0.0, 0.0, len(good), 0
+    points_previous = np.float32([key_previous[match.queryIdx].pt for match in good])
+    points_current = np.float32([key_current[match.trainIdx].pt for match in good])
+    _, inliers = cv2.findHomography(points_previous, points_current, cv2.RANSAC, 5.0)
+    if inliers is None:
+        return 0.0, 0.0, 0.0, len(good), 0
+    accepted = inliers.ravel().astype(bool)
+    if not np.any(accepted):
+        return 0.0, 0.0, 0.0, len(good), 0
+    points_previous = points_previous[accepted] / scale
+    points_current = points_current[accepted] / scale
+    previous_center = previous_bbox[0] + previous_bbox[2] * 0.5
+    current_center = current_bbox[0] + current_bbox[2] * 0.5
+    previous_radius = max(previous_bbox[2] * 0.48, 2.0)
+    current_radius = max(current_bbox[2] * 0.48, 2.0)
+    relative_previous = np.clip((points_previous[:, 0] - previous_center) / previous_radius, -0.999, 0.999)
+    relative_current = np.clip((points_current[:, 0] - current_center) / current_radius, -0.999, 0.999)
+    delta = float(np.median(np.arcsin(relative_current) - np.arcsin(relative_previous)))
+    vertical_delta = float(np.median(points_current[:, 1] - points_previous[:, 1]))
+    inlier_count = int(accepted.sum())
+    return delta, inlier_count / max(len(good), 1), vertical_delta, len(good), inlier_count
+
+
 def normalized_wall(image: np.ndarray, mask: np.ndarray, bbox: tuple[int, int, int, int], height: int) -> tuple[np.ndarray, np.ndarray]:
     x, y, width, source_height = bbox
     wall = image[y : y + source_height, x : x + width]

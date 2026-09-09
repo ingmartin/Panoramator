@@ -103,7 +103,7 @@ def unwrap_command(args: argparse.Namespace) -> int:
     print(result.diagnostics.message)
     if result.diagnostics.recommendation:
         print(f"Recommendation: {result.diagnostics.recommendation}")
-    return 0 if result.output_path is not None and result.diagnostics.status in {UnwrapStatus.OK, UnwrapStatus.PARTIAL_SURFACE} else 2
+    return 0 if result.output_path is not None and result.diagnostics.status in {UnwrapStatus.OK, UnwrapStatus.PARTIAL_SURFACE, UnwrapStatus.OBSERVED_SURFACE} else 2
 
 
 def export_config_command(args: argparse.Namespace) -> int:

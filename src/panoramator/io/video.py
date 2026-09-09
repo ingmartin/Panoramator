@@ -14,6 +14,8 @@ class OpenCVVideoSource:
         self.path = Path(path)
         self.config = config
         self.capture: cv2.VideoCapture | None = None
+        self.orientation_degrees = 0.0
+        self.orientation_applied_by_opencv = False
 
     def open(self) -> VideoMetadata:
         self.close()
@@ -26,6 +28,17 @@ class OpenCVVideoSource:
         frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        self.orientation_degrees = float(
+            capture.get(cv2.CAP_PROP_ORIENTATION_META) or 0.0
+        )
+        self.orientation_applied_by_opencv = bool(
+            capture.get(cv2.CAP_PROP_ORIENTATION_AUTO)
+        )
+        if (
+            not self.orientation_applied_by_opencv
+            and self.orientation_degrees in {90.0, 270.0}
+        ):
+            width, height = height, width
         return VideoMetadata(self.path, fps, frame_count, width, height)
 
     def iter_frames(self) -> list[Frame]:
@@ -73,10 +86,10 @@ class OpenCVVideoSource:
         return frames
 
     def _prepare_images(self, image: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
-        base_image = image
+        base_image = self._apply_orientation(image)
         if self.config.downscale != 1.0:
             base_image = cv2.resize(
-                image,
+                base_image,
                 None,
                 fx=self.config.downscale,
                 fy=self.config.downscale,
@@ -92,6 +105,19 @@ class OpenCVVideoSource:
                 interpolation=cv2.INTER_AREA,
             )
         return base_image, feature_image
+
+    def _apply_orientation(self, image: np.ndarray) -> np.ndarray:
+        """Convert codec storage orientation to the displayed video orientation."""
+        if self.orientation_applied_by_opencv:
+            return image
+        orientation = round(self.orientation_degrees) % 360
+        if orientation == 90:
+            return cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+        if orientation == 180:
+            return cv2.rotate(image, cv2.ROTATE_180)
+        if orientation == 270:
+            return cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return image
 
     def _target_frame_indices(self, total_frame_count: int, step: int) -> list[int]:
         if total_frame_count <= 0:

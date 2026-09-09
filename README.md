@@ -50,7 +50,7 @@ panoramator build video.mp4 output.png
 ### Unwrap an object surface
 
 ```bash
-panoramator unwrap video.mp4 surface.png --surface auto --allow-partial
+panoramator unwrap video.mp4 surface.png --surface cylindrical
 ```
 
 ## Typical Workflows
@@ -70,7 +70,7 @@ panoramator build input.mp4 output.png --capture-mode rotation --horizontal-fov-
 ### 3. Orbit around one object
 
 ```bash
-panoramator unwrap input.mp4 surface.png --surface auto --allow-partial
+panoramator unwrap input.mp4 surface.png --surface cylindrical
 ```
 
 ### 4. Clean crop for presentation-ready output
@@ -130,8 +130,7 @@ panoramator build input.mp4 output.png --seam-blur-kernel 7 --seam-band-width 9 
 
 ```bash
 panoramator unwrap input.mp4 surface.png \
-  --surface auto \
-  --allow-partial \
+  --surface cylindrical \
   --photo-mode \
   --photo-crop-margin-px 5
 ```
@@ -225,10 +224,68 @@ print(result.diagnostics.output_files)
 python -m pip install -e ".[dev]"
 ```
 
+## Verifying Cylindrical Unwrap
+
+Use an explicit surface kind when checking a cylindrical object. The command below keeps the normal quality gates enabled and writes the diagnostics needed to inspect the result:
+
+```bash
+panoramator unwrap input.mp4 output/cylinder.png \
+  --surface cylindrical \
+  --publish-profile balanced_publish \
+  --sampling-step 12 \
+  --max-frames 60 \
+  --output-width 1536 \
+  --output-height 512 \
+  --interpolate-gaps \
+  --max-interpolation-gap-px 96 \
+  --save-debug-artifacts
+```
+
+For a fast pipeline smoke test, reduce the workload and explicitly allow a partial image. A sparse sample such as `--sampling-step 24 --max-frames 12` is intentionally not comparable with a full orbit: it may return `unstable_camera_geometry`, and `--allow-partial` does not override that geometry safety gate. To guarantee a diagnostic image from a sparse run, use `--surface-output-mode observed_surface`.
+
+```bash
+panoramator unwrap input.mp4 output/cylinder-smoke.png \
+  --surface cylindrical \
+  --sampling-step 24 \
+  --max-frames 12 \
+  --output-width 768 \
+  --output-height 256 \
+  --surface-output-mode observed_surface \
+  --allow-partial \
+  --save-debug-artifacts
+```
+
+The cylindrical renderer uses the mask as confidence for source-column selection and geometry checks, not as a hard foreground cutout. Texture details inside a selected surface band—such as ears, outlines, and bright printed areas—are therefore preserved. Short internal gaps are filled by interpolation between observed pixels; large external frame regions are still not invented. The `curved` path remains separate and does not inherit this publication policy.
+
+If transparent stripes still interfere with visual inspection, enable bounded gap interpolation:
+
+```bash
+panoramator unwrap input.mp4 output/cylinder-filled.png \
+  --surface cylindrical \
+  --surface-output-mode observed_surface \
+  --interpolate-gaps \
+  --max-interpolation-gap-px 96 \
+  --allow-partial
+```
+
+Interpolation is applied only between two observed regions in the same row or column. Outer margins and gaps wider than `--max-interpolation-gap-px` remain transparent.
+
+For a real cylindrical acceptance run, do not add `--allow-partial`. Inspect `output/cylinder_debug/run.json` and check that `status` is `ok`, `surface_kind` is `cylindrical`, and `measurements.rendering` and `measurements.primary_renderer` are both `inverse_cylindrical_atlas`. Also check `coverage_fraction`, `pose_residual_radians`, and the accepted/rejected pose-pair counts. The image-space `mosaic` and `angular_mosaic` files are diagnostics; the saved surface image is produced by the primary cylindrical renderer.
+
+Run the curved regression separately on a known curved-object clip:
+
+```bash
+panoramator unwrap curved-input.mp4 output/curved.png \
+  --surface curved \
+  --publish-profile balanced_publish \
+  --save-debug-artifacts
+```
+
 ## Tests
 
 ```bash
-pytest -q
+python -m pytest -q
+python -m pytest -q --cov=panoramator --cov-report=term-missing
 ```
 
 Private acceptance fixtures are intentionally separate from the default reproducible suite:

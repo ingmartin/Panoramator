@@ -20,9 +20,15 @@ class PublishProfile(StrEnum):
     COVERAGE_FIRST = "coverage_first"
 
 
+class SurfaceOutputMode(StrEnum):
+    CONFIRMED_GEOMETRY = "confirmed_geometry"
+    OBSERVED_SURFACE = "observed_surface"
+
+
 class UnwrapStatus(StrEnum):
     OK = "ok"
     PARTIAL_SURFACE = "partial_surface"
+    OBSERVED_SURFACE = "observed_surface"
     OBJECT_NOT_DETECTED = "object_not_detected"
     INSUFFICIENT_TEXTURE = "insufficient_texture"
     INSUFFICIENT_COVERAGE = "insufficient_coverage"
@@ -79,6 +85,7 @@ class UnwrapResult:
 class UnwrapConfig:
     surface_kind: SurfaceKind = SurfaceKind.AUTO
     publish_profile: PublishProfile = PublishProfile.BALANCED
+    surface_output_mode: SurfaceOutputMode = SurfaceOutputMode.CONFIRMED_GEOMETRY
     allow_partial: bool = False
     sampling_step: int = 12
     max_frames: int = 48
@@ -87,6 +94,8 @@ class UnwrapConfig:
     min_coverage: float = 0.90
     output_height: int = 512
     output_width: int = 1536
+    interpolate_gaps: bool = False
+    max_interpolation_gap_px: int = 96
     save_debug_artifacts: bool = True
     crop_result: bool = True
     photo_mode: bool = False
@@ -124,6 +133,7 @@ class UnwrapConfig:
         result = asdict(self)
         result["surface_kind"] = self.surface_kind.value
         result["publish_profile"] = self.publish_profile.value
+        result["surface_output_mode"] = self.surface_output_mode.value
         return result
 
     def save(self, path: str | Path) -> None:
@@ -132,6 +142,7 @@ class UnwrapConfig:
     def validate(self) -> None:
         self.surface_kind = SurfaceKind(self.surface_kind)
         self.publish_profile = PublishProfile(self.publish_profile)
+        self.surface_output_mode = SurfaceOutputMode(self.surface_output_mode)
         if self.sampling_step < 1 or not 2 <= self.max_frames <= 65_535:
             raise ValueError("sampling_step must be >= 1 and max_frames must be between 2 and 65535")
         if not 0 < self.min_object_area_ratio < 1:
@@ -140,6 +151,8 @@ class UnwrapConfig:
             raise ValueError("min_coverage must be between 0 and 1")
         if self.output_height < 32 or self.output_width < 64:
             raise ValueError("output dimensions are too small")
+        if self.max_interpolation_gap_px < 1:
+            raise ValueError("max_interpolation_gap_px must be >= 1")
         if self.photo_crop_margin_px < 0:
             raise ValueError("photo_crop_margin_px must be >= 0")
         if not 0 <= self.photo_crop_max_loss <= 1:

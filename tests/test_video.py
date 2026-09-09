@@ -65,3 +65,16 @@ def test_prepare_images_can_keep_full_resolution_and_downscale_features() -> Non
     assert base_image.shape == (10, 8, 3)
     assert feature_image is not None
     assert feature_image.shape == (5, 4, 3)
+
+
+def test_prepare_images_applies_video_display_orientation() -> None:
+    source = OpenCVVideoSource("dummy.mp4", PanoramaConfig())
+    cast(Any, source).orientation_degrees = 90.0
+    cast(Any, source).orientation_applied_by_opencv = False
+    image = np.zeros((2, 3, 3), dtype=np.uint8)
+    image[0, 0] = (1, 2, 3)
+
+    base_image, _ = source._prepare_images(image)
+
+    assert base_image.shape == (3, 2, 3)
+    assert tuple(base_image[0, 1]) == (1, 2, 3)
