@@ -218,6 +218,21 @@ print(result.diagnostics.status)
 print(result.diagnostics.output_files)
 ```
 
+For an on-device capture that already produces JPEG/PNG frames, no temporary
+video is required:
+
+```python
+from panoramator import DirectoryFrameSource, PanoramaBuilder
+
+frames = DirectoryFrameSource("capture")
+result = PanoramaBuilder().build_from_frames(frames, "panorama.jpg")
+print(result.width, result.height, result.used_frames)
+```
+
+`build_from_frames()` also accepts an iterable of BGR `numpy.ndarray` frames.
+Progress and cancellation callbacks are optional, and output replacement is
+atomic after a successful encode.
+
 ## Installation For Development
 
 ```bash

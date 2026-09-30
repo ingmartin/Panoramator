@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -10,6 +10,14 @@ if TYPE_CHECKING:
     from panoramator.projection.models import Projection
 
 ImageArray = np.ndarray
+
+
+@dataclass(slots=True, frozen=True)
+class Progress:
+    stage: str
+    completed: int
+    total: int | None
+    fraction: float | None
 
 
 @dataclass(slots=True)
@@ -105,6 +113,19 @@ class PanoramaDiagnostics:
     global_photometric_metrics: list[dict[str, float]] = field(default_factory=list)
     gap_fill_metrics: dict[str, float] = field(default_factory=dict)
     status: str = "ok"
+    input_frame_count: int = 0
+    discarded_frame_count: int = 0
+    successful_links: int = 0
+    output_size: tuple[int, int] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Expose diagnostics to clients that prefer a dictionary contract."""
+        from dataclasses import asdict
+
+        return asdict(self)
+
+    def __getitem__(self, key: str) -> Any:
+        return self.to_dict()[key]
 
 
 @dataclass(slots=True)
@@ -112,3 +133,10 @@ class PanoramaResult:
     image: ImageArray | None
     metadata: VideoMetadata
     diagnostics: PanoramaDiagnostics
+    output_path: str | None = None
+    width: int = 0
+    height: int = 0
+    used_frames: int = 0
+    discarded_frames: int = 0
+    quality: float | None = None
+    status: str = "ok"

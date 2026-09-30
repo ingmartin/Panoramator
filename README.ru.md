@@ -220,6 +220,20 @@ print(result.diagnostics.status)
 print(result.diagnostics.output_files)
 ```
 
+Если приложение уже получает JPEG/PNG-кадры, промежуточный MP4 не нужен:
+
+```python
+from panoramator import DirectoryFrameSource, PanoramaBuilder
+
+frames = DirectoryFrameSource("capture")
+result = PanoramaBuilder().build_from_frames(frames, "panorama.jpg")
+print(result.width, result.height, result.used_frames)
+```
+
+`build_from_frames()` также принимает ленивый iterable BGR-кадров
+`numpy.ndarray`. Callback прогресса и отмены необязательны; финальный файл
+заменяется атомарно только после успешной записи.
+
 ## Установка Для Разработки
 
 ```bash

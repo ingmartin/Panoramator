@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from itertools import pairwise
 from pathlib import Path
 
@@ -13,6 +15,7 @@ from panoramator.camera.models import CameraParameters
 from panoramator.canvas.builder import PanoramaCanvasBuilder
 from panoramator.config.models import PanoramaConfig
 from panoramator.diagnostics.reporting import write_diagnostics
+from panoramator.domain.errors import CanvasLimitExceeded, PanoramaCancelled
 from panoramator.domain.interfaces import FeatureExtractor
 from panoramator.domain.models import (
     CanvasModel,
@@ -21,6 +24,7 @@ from panoramator.domain.models import (
     PairGeometry,
     PanoramaDiagnostics,
     PanoramaResult,
+    Progress,
     SelectedFrame,
     VideoMetadata,
 )
@@ -30,6 +34,12 @@ from panoramator.geometry.homography import (
     accumulate_global_homographies,
 )
 from panoramator.geometry.trajectory import stabilize_rotation_trajectory
+from panoramator.io.frames import (
+    FrameDecodeError,
+    FrameInput,
+    FrameSource,
+    decode_frame_input,
+)
 from panoramator.io.video import OpenCVVideoSource
 from panoramator.matching.matchers import BFMatcherAdapter
 from panoramator.motion_analysis.analyzer import MotionAnalysis, MotionAnalyzer
@@ -83,6 +93,13 @@ class _RenderedPanorama:
     gap_fill_metrics: dict[str, float]
 
 
+@dataclass(slots=True, frozen=True)
+class _BuildCallbacks:
+    progress: Callable[[Progress], None] | None = None
+    cancel: Callable[[], bool] | None = None
+    last_completed: dict[str, int] = dataclass_field(default_factory=dict)
+
+
 class PanoramaBuilder:
     def __init__(self, config: PanoramaConfig | None = None) -> None:
         self.config = config or PanoramaConfig()
@@ -93,13 +110,21 @@ class PanoramaBuilder:
         self.warper = FrameWarper()
         self.blender = AverageBlender(self.config)
         self.motion_analyzer = MotionAnalyzer()
+        self._last_canvas_error: str | None = None
 
     def build_from_video(self, video_path: str | Path, output_path: str | Path) -> PanoramaResult:
         execution = self._prepare_build(video_path)
         if execution.orbit_status == "orbit_not_supported_reliably":
             diagnostics = self._build_orbit_rejection_diagnostics(execution)
             self._write_debug_diagnostics(Path(output_path), self.config, diagnostics)
-            return PanoramaResult(image=None, metadata=execution.metadata, diagnostics=diagnostics)
+            return PanoramaResult(
+                image=None,
+                metadata=execution.metadata,
+                diagnostics=diagnostics,
+                used_frames=len(execution.chain_result.filtered_frames),
+                discarded_frames=len(execution.chain_result.rejected_frames),
+                status=diagnostics.status,
+            )
 
         rendered = self._render_panorama(execution, output_path)
         output = self._write_panorama_image(output_path, rendered.image)
@@ -113,11 +138,170 @@ class PanoramaBuilder:
             ),
             diagnostics,
         )
-        return PanoramaResult(image=rendered.image, metadata=execution.metadata, diagnostics=diagnostics)
+        return PanoramaResult(
+            image=rendered.image,
+            metadata=execution.metadata,
+            diagnostics=diagnostics,
+            output_path=str(output),
+            width=rendered.image.shape[1],
+            height=rendered.image.shape[0],
+            used_frames=len(execution.chain_result.filtered_frames),
+            discarded_frames=len(execution.chain_result.rejected_frames),
+            quality=self._quality_from_diagnostics(diagnostics),
+            status=diagnostics.status,
+        )
+
+    def build_from_frames(
+        self,
+        frames: Iterable[FrameInput] | FrameSource,
+        output_path: str | Path,
+        *,
+        progress_callback: Callable[[Progress], None] | None = None,
+        cancel_callback: Callable[[], bool] | None = None,
+        max_canvas_width: int | None = None,
+        max_canvas_height: int | None = None,
+        capture_mode: str = "linear",
+    ) -> PanoramaResult:
+        """Build a panorama from BGR arrays or lazily decoded image paths."""
+        if frames is None:
+            raise ValueError("frames must not be None")
+        effective_config = replace(
+            self.config,
+            capture_mode=capture_mode,
+            max_canvas_width=(
+                self.config.max_canvas_width if max_canvas_width is None else max_canvas_width
+            ),
+            max_canvas_height=(
+                self.config.max_canvas_height if max_canvas_height is None else max_canvas_height
+            ),
+        )
+        builder = self if effective_config == self.config else PanoramaBuilder(effective_config)
+        callbacks = _BuildCallbacks(progress_callback, cancel_callback)
+        return builder._build_from_frame_source(frames, output_path, callbacks)
+
+    def _build_from_frame_source(
+        self,
+        frames: Iterable[FrameInput] | FrameSource,
+        output_path: str | Path,
+        callbacks: _BuildCallbacks,
+    ) -> PanoramaResult:
+        total = _source_length(frames)
+        _check_cancel(callbacks)
+        _emit_progress(callbacks, "reading", 0, total)
+        decoded_frames: list[Frame] = []
+        rejected_inputs: list[dict[str, object]] = []
+        expected_shape: tuple[int, int] | None = None
+        input_count = 0
+        target_indices = _source_indices(total, self.config.max_frames)
+        target_index_set = set(target_indices) if target_indices is not None else None
+
+        for index, value in enumerate(frames):
+            _check_cancel(callbacks)
+            input_count += 1
+            if target_index_set is not None and index not in target_index_set:
+                _emit_progress(callbacks, "reading", input_count, total)
+                continue
+            try:
+                image = decode_frame_input(value)
+            except FrameDecodeError as exc:
+                rejected_inputs.append({"frame_index": index, "reason": "decode_error", "message": str(exc)})
+                _emit_progress(callbacks, "reading", input_count, total)
+                continue
+            if expected_shape is None:
+                expected_shape = image.shape[:2]
+            elif image.shape[:2] != expected_shape:
+                rejected_inputs.append(
+                    {
+                        "frame_index": index,
+                        "reason": "shape_mismatch",
+                        "expected_shape": expected_shape,
+                        "actual_shape": image.shape[:2],
+                    }
+                )
+                _emit_progress(callbacks, "reading", input_count, total)
+                continue
+            decoded_frames.append(Frame(index=index, timestamp_seconds=float(index), image=image))
+            _emit_progress(callbacks, "reading", input_count, total)
+            if target_index_set is None and len(decoded_frames) >= self.config.max_frames:
+                break
+
+        _check_cancel(callbacks)
+        if not decoded_frames:
+            raise ValueError("Frame source is empty or contains no decodable frames")
+        _emit_progress(callbacks, "selection", 0, 1)
+        selected_frames, rejected_frames = FrameSelector(self.config).select(decoded_frames)
+        rejected_frames = [*rejected_inputs, *rejected_frames]
+        _emit_progress(callbacks, "selection", 1, 1)
+        if len(selected_frames) < 2:
+            raise RuntimeError("Not enough selected frames to build a panorama")
+
+        chain_result = self._build_best_chain_from_frames(selected_frames, rejected_frames, callbacks)
+        if len(chain_result.filtered_frames) < 2:
+            if any(item.get("reason") == "canvas_limit" for item in chain_result.pair_metrics):
+                raise CanvasLimitExceeded(
+                    self._last_canvas_error
+                    or (
+                        f"Frame chain exceeds canvas limits "
+                        f"{self.config.max_canvas_width}x{self.config.max_canvas_height}"
+                    )
+                )
+            raise RuntimeError("No valid frame chain remained after geometry validation")
+
+        metadata = VideoMetadata(
+            path=Path("<frames>"),
+            fps=0.0,
+            frame_count=input_count,
+            width=expected_shape[1] if expected_shape else 0,
+            height=expected_shape[0] if expected_shape else 0,
+        )
+        execution = self._prepare_execution(metadata, chain_result, callbacks)
+        _check_cancel(callbacks)
+        _emit_progress(callbacks, "rendering", 0, 1)
+        rendered = self._render_panorama(execution, output_path, callbacks)
+        _emit_progress(callbacks, "rendering", 1, 1)
+        _emit_progress(callbacks, "saving", 0, 1)
+        output = self._write_panorama_image(output_path, rendered.image, callbacks)
+        diagnostics = self._build_success_diagnostics(execution, rendered, output)
+        diagnostics.input_frame_count = input_count
+        diagnostics.discarded_frame_count = len(rejected_frames)
+        diagnostics.successful_links = len(execution.chain_result.pairwise_homographies)
+        diagnostics.output_size = (rendered.image.shape[1], rendered.image.shape[0])
+        self._write_debug_diagnostics(
+            output,
+            replace(
+                self.config,
+                feature_backend=execution.chain_result.backend,
+                sampling_step=execution.chain_result.sampling_step,
+            ),
+            diagnostics,
+        )
+        _emit_progress(callbacks, "saving", 1, 1)
+        _emit_progress(callbacks, "completed", 1, 1)
+        return PanoramaResult(
+            image=rendered.image,
+            metadata=metadata,
+            diagnostics=diagnostics,
+            output_path=str(output),
+            width=rendered.image.shape[1],
+            height=rendered.image.shape[0],
+            used_frames=len(execution.chain_result.filtered_frames),
+            discarded_frames=len(rejected_frames),
+            quality=self._quality_from_diagnostics(diagnostics),
+            status=diagnostics.status,
+        )
 
     def _prepare_build(self, video_path: str | Path) -> _BuildExecution:
         metadata = self._read_metadata(video_path)
         chain_result = self._build_best_chain(video_path)
+        return self._prepare_execution(metadata, chain_result)
+
+    def _prepare_execution(
+        self,
+        metadata: VideoMetadata,
+        chain_result: _ChainBuildResult,
+        callbacks: _BuildCallbacks | None = None,
+    ) -> _BuildExecution:
+        _check_cancel(callbacks)
         if len(chain_result.selected_frames) < 2:
             raise RuntimeError("Not enough selected frames to build a panorama")
         if len(chain_result.filtered_frames) < 2:
@@ -125,7 +309,7 @@ class PanoramaBuilder:
 
         cylindrical_preview: _ChainBuildResult | None = None
         if self.config.capture_mode == "auto" and self.config.projection == "auto":
-            cylindrical_preview = self._build_cylindrical_preview(chain_result)
+            cylindrical_preview = self._build_cylindrical_preview(chain_result, callbacks)
         analysis = self.motion_analyzer.analyze(
             chain_result.pairwise_homographies,
             chain_result.pair_metrics,
@@ -135,6 +319,7 @@ class PanoramaBuilder:
                 else None
             ),
         )
+        _emit_progress(callbacks, "homography", 1, 1)
         decision = resolve_strategy(self.config, analysis)
         if decision.capture_mode == "rotation" and cylindrical_preview is not None:
             # These transforms were estimated in cylindrical local coordinates,
@@ -165,7 +350,13 @@ class PanoramaBuilder:
             keyframe_metrics=keyframe_metrics,
         )
 
-    def _render_panorama(self, execution: _BuildExecution, output_path: str | Path) -> _RenderedPanorama:
+    def _render_panorama(
+        self,
+        execution: _BuildExecution,
+        output_path: str | Path,
+        callbacks: _BuildCallbacks | None = None,
+    ) -> _RenderedPanorama:
+        _check_cancel(callbacks)
         frame_shapes = [item.frame.image.shape[:2] for item in execution.normalized_frames]
         camera = CameraParameters.from_config(self.config, frame_shapes[0])
         projection = create_projection(execution.decision.projection, camera)
@@ -175,7 +366,8 @@ class PanoramaBuilder:
         else:
             canvas = self.canvas_builder.build(frame_shapes, execution.global_homographies, projection)
 
-        warped_frames, warped_masks, frame_sharpnesses = self._warp_frames(execution, canvas)
+        warped_frames, warped_masks, frame_sharpnesses = self._warp_frames(execution, canvas, callbacks)
+        _check_cancel(callbacks)
         panorama = self._blend_warped_frames(execution.decision.projection, warped_frames, warped_masks, frame_sharpnesses)
         visible_mask = self._combined_visible_mask(warped_masks)
         panorama, visible_mask, gap_fill_metrics = self._apply_gap_fill(execution, panorama, visible_mask)
@@ -197,11 +389,13 @@ class PanoramaBuilder:
         self,
         execution: _BuildExecution,
         canvas: CanvasModel,
+        callbacks: _BuildCallbacks | None = None,
     ) -> tuple[list[np.ndarray], list[np.ndarray], list[float]]:
         warped_frames: list[np.ndarray] = []
         warped_masks: list[np.ndarray] = []
         frame_sharpnesses: list[float] = []
         for selected, homography in zip(execution.normalized_frames, execution.global_homographies, strict=True):
+            _check_cancel(callbacks)
             warped, mask = self.warper.warp(selected.frame, homography, canvas)
             warped_frames.append(warped)
             warped_masks.append(mask)
@@ -271,11 +465,33 @@ class PanoramaBuilder:
             )
         return apply_final_sharpening(panorama, self.config), crop_policy, crop_loss, before_crop_size
 
-    def _write_panorama_image(self, output_path: str | Path, panorama: np.ndarray) -> Path:
+    def _write_panorama_image(
+        self,
+        output_path: str | Path,
+        panorama: np.ndarray,
+        callbacks: _BuildCallbacks | None = None,
+    ) -> Path:
+        _check_cancel(callbacks)
         output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
-        if not cv2.imwrite(str(output), panorama):
-            raise RuntimeError(f"Failed to write output image: {output}")
+        temporary: Path | None = None
+        try:
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(
+                dir=output.parent,
+                prefix=f".{output.name}.",
+                suffix=output.suffix or ".tmp",
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+            if not cv2.imwrite(str(temporary), panorama):
+                raise RuntimeError(f"Failed to write output image: {output}")
+            _check_cancel(callbacks)
+            temporary.replace(output)
+        finally:
+            if temporary is not None and temporary.exists():
+                temporary.unlink()
         return output
 
     def _build_orbit_rejection_diagnostics(self, execution: _BuildExecution) -> PanoramaDiagnostics:
@@ -351,6 +567,10 @@ class PanoramaBuilder:
             global_photometric_metrics=self.blender.last_global_photometric_metrics,
             gap_fill_metrics=rendered.gap_fill_metrics,
             status=execution.orbit_status,
+            input_frame_count=execution.metadata.frame_count,
+            discarded_frame_count=len(execution.chain_result.rejected_frames),
+            successful_links=len(execution.chain_result.pairwise_homographies),
+            output_size=(rendered.image.shape[1], rendered.image.shape[0]),
         )
 
     def _write_debug_diagnostics(
@@ -367,6 +587,7 @@ class PanoramaBuilder:
             LOGGER.warning("Failed to write debug artifacts for %s: %s", output_path, exc)
 
     def _build_best_chain(self, video_path: str | Path) -> _ChainBuildResult:
+        self._last_canvas_error = None
         sampling_steps = self._sampling_steps_to_try()
         results: list[_ChainBuildResult] = []
 
@@ -397,7 +618,37 @@ class PanoramaBuilder:
                 best = candidate
         return best
 
-    def _build_cylindrical_preview(self, chain: _ChainBuildResult) -> _ChainBuildResult | None:
+    def _build_best_chain_from_frames(
+        self,
+        selected_frames: list[SelectedFrame],
+        rejected_frames: list[dict[str, object]],
+        callbacks: _BuildCallbacks,
+    ) -> _ChainBuildResult:
+        self._last_canvas_error = None
+        sampling_steps = self._sampling_steps_to_try()
+        results: list[_ChainBuildResult] = []
+        for step in sampling_steps:
+            _check_cancel(callbacks)
+            step_config = replace(self.config, sampling_step=step)
+            chain_result = self._build_chain_with_fallback(
+                selected_frames,
+                rejected_frames,
+                step_config,
+                sampling_steps,
+                callbacks,
+            )
+            results.append(chain_result)
+        best = results[0]
+        for candidate in results[1:]:
+            if self._is_better_chain(candidate, best):
+                best = candidate
+        return best
+
+    def _build_cylindrical_preview(
+        self,
+        chain: _ChainBuildResult,
+        callbacks: _BuildCallbacks | None = None,
+    ) -> _ChainBuildResult | None:
         """Build a reduced-commitment curved geometry candidate for ``auto``.
 
         It reuses already selected frames, so it neither changes sampling nor
@@ -410,12 +661,21 @@ class PanoramaBuilder:
             capture_mode="rotation",
             projection="cylindrical",
         )
-        preview = self._build_chain_with_fallback(
-            chain.selected_frames,
-            chain.rejected_frames,
-            preview_config,
-            [chain.sampling_step],
-        )
+        if callbacks is None:
+            preview = self._build_chain_with_fallback(
+                chain.selected_frames,
+                chain.rejected_frames,
+                preview_config,
+                [chain.sampling_step],
+            )
+        else:
+            preview = self._build_chain_with_fallback(
+                chain.selected_frames,
+                chain.rejected_frames,
+                preview_config,
+                [chain.sampling_step],
+                callbacks,
+            )
         return preview if len(preview.filtered_frames) >= 2 else None
 
     def _build_chain_with_fallback(
@@ -424,8 +684,19 @@ class PanoramaBuilder:
         rejected_frames: list[dict[str, object]],
         config: PanoramaConfig,
         attempted_sampling_steps: list[int],
+        callbacks: _BuildCallbacks | None = None,
     ) -> _ChainBuildResult:
-        primary = self._build_chain(selected_frames, rejected_frames, config, config.feature_backend, attempted_sampling_steps)
+        if callbacks is None:
+            primary = self._build_chain(selected_frames, rejected_frames, config, config.feature_backend, attempted_sampling_steps)
+        else:
+            primary = self._build_chain(
+                selected_frames,
+                rejected_frames,
+                config,
+                config.feature_backend,
+                attempted_sampling_steps,
+                callbacks,
+            )
         if not self._should_try_fallback(primary):
             return primary
 
@@ -433,7 +704,17 @@ class PanoramaBuilder:
         if fallback_backend == primary.backend:
             return primary
 
-        fallback = self._build_chain(selected_frames, rejected_frames, config, fallback_backend, attempted_sampling_steps)
+        if callbacks is None:
+            fallback = self._build_chain(selected_frames, rejected_frames, config, fallback_backend, attempted_sampling_steps)
+        else:
+            fallback = self._build_chain(
+                selected_frames,
+                rejected_frames,
+                config,
+                fallback_backend,
+                attempted_sampling_steps,
+                callbacks,
+            )
         fallback.attempted_backends = [primary.backend, fallback.backend]
         primary.attempted_backends = [primary.backend, fallback.backend]
         if len(fallback.filtered_frames) > len(primary.filtered_frames):
@@ -447,6 +728,7 @@ class PanoramaBuilder:
         config: PanoramaConfig,
         backend: str,
         attempted_sampling_steps: list[int],
+        callbacks: _BuildCallbacks | None = None,
     ) -> _ChainBuildResult:
         backend_config = replace(config, feature_backend=backend)
         extractor = create_feature_extractor(backend_config)
@@ -466,6 +748,7 @@ class PanoramaBuilder:
         }
 
         for index in range(1, len(selected_frames)):
+            _check_cancel(callbacks)
             left_frame = filtered_frames[-1].frame
             left_features = filtered_features[-1]
             chosen_selected, chosen_features, chosen_geometry = self._resolve_frame_candidate(
@@ -477,7 +760,9 @@ class PanoramaBuilder:
                 backend,
                 pair_metrics,
                 geometry_projection,
+                callbacks,
             )
+            _emit_progress(callbacks, "matching", index, len(selected_frames) - 1)
             if chosen_geometry is None or chosen_features is None or chosen_selected is None:
                 continue
             homography = chosen_geometry.homography
@@ -516,11 +801,13 @@ class PanoramaBuilder:
         backend: str,
         pair_metrics: list[dict[str, object]],
         geometry_projection: Projection,
+        callbacks: _BuildCallbacks | None = None,
     ) -> tuple[SelectedFrame | None, FeatureSet | None, PairGeometry | None]:
         candidates = [selected_frame.frame, *selected_frame.alternates]
         fallback_used = False
 
         for candidate_frame in candidates:
+            _check_cancel(callbacks)
             candidate_features = feature_cache.get(id(candidate_frame))
             if candidate_features is None:
                 candidate_features = extractor.extract(project_frame_for_geometry(candidate_frame, geometry_projection))
@@ -627,7 +914,9 @@ class PanoramaBuilder:
         frame_shapes = [item.frame.image.shape[:2] for item in selected_frames]
         try:
             self.canvas_builder.build(frame_shapes, global_homographies, projection)
-        except RuntimeError:
+        except RuntimeError as exc:
+            if "exceeds limits" in str(exc):
+                self._last_canvas_error = str(exc)
             return False
         return True
 
@@ -698,6 +987,17 @@ class PanoramaBuilder:
         return "orbit_not_supported_reliably"
 
     @staticmethod
+    def _quality_from_diagnostics(diagnostics: PanoramaDiagnostics) -> float | None:
+        confidences = [
+            float(metric["confidence"])
+            for metric in diagnostics.pair_metrics
+            if isinstance(metric.get("confidence"), (int, float)) and metric.get("valid", False)
+        ]
+        if not confidences:
+            return None
+        return float(np.mean(confidences))
+
+    @staticmethod
     def _combined_visible_mask(warped_masks: list[np.ndarray]) -> np.ndarray | None:
         if not warped_masks:
             return None
@@ -711,3 +1011,38 @@ class PanoramaBuilder:
         candidate_key = (len(candidate.filtered_frames), len(candidate.selected_frames))
         current_key = (len(current.filtered_frames), len(current.selected_frames))
         return candidate_key > current_key
+
+
+def _source_length(source: Iterable[FrameInput]) -> int | None:
+    try:
+        return len(source)  # type: ignore[arg-type]
+    except TypeError:
+        return None
+
+
+def _source_indices(total: int | None, max_frames: int) -> list[int] | None:
+    if total is None:
+        return None
+    if total <= max_frames:
+        return list(range(total))
+    positions = np.linspace(0, total - 1, num=max_frames)
+    return list(dict.fromkeys(np.rint(positions).astype(int).tolist()))
+
+
+def _check_cancel(callbacks: _BuildCallbacks | None) -> None:
+    if callbacks is not None and callbacks.cancel is not None and callbacks.cancel():
+        raise PanoramaCancelled("Panorama build was cancelled")
+
+
+def _emit_progress(
+    callbacks: _BuildCallbacks | None,
+    stage: str,
+    completed: int,
+    total: int | None,
+) -> None:
+    if callbacks is None or callbacks.progress is None:
+        return
+    completed = max(completed, callbacks.last_completed.get(stage, 0))
+    callbacks.last_completed[stage] = completed
+    fraction = None if total is None else min(1.0, max(0.0, completed / max(1, total)))
+    callbacks.progress(Progress(stage=stage, completed=completed, total=total, fraction=fraction))
