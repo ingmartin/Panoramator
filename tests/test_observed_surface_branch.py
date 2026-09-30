@@ -5,9 +5,9 @@ import numpy as np
 import pytest
 
 from panoramator.domain.models import Frame
+from panoramator.object_unwrap import observed_surface
 from panoramator.object_unwrap.analyzer import Analysis, AnalyzedFrame
 from panoramator.object_unwrap.models import SurfaceKind, SurfaceModel, UnwrapConfig
-from panoramator.object_unwrap import observed_surface
 from panoramator.object_unwrap.observed_surface import ObservedSurfaceBuilder
 from panoramator.object_unwrap.service import _SurfaceBuild
 

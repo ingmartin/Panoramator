@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
@@ -10,19 +9,11 @@ from . import analyzer as analyzer_module
 from .analyzer import Analysis, AnalyzedFrame
 from .coverage import coverage_fraction
 from .cylinder.mapper import central_band, horizontal_shift, normalized_wall
-from .models import SurfaceKind, SurfaceModel, UnwrapConfig
+from .models import SurfaceBuild, SurfaceKind, UnwrapConfig
 
-if TYPE_CHECKING:
-    from .service import _SurfaceBuild
-
-
-@dataclass(slots=True)
-class ObservedSurfaceBuild:
-    image: np.ndarray
-    coverage: np.ndarray
-    model: SurfaceModel
-    measurements: dict[str, float | int | str | list[float] | list[int]]
-    artifacts: dict[str, object]
+# Kept as a compatibility name for callers that imported the old builder
+# result, while all unwrap builders now share one intermediate model.
+ObservedSurfaceBuild = SurfaceBuild
 
 
 @dataclass(slots=True)
@@ -37,7 +28,7 @@ class ObservedSurfaceBuilder:
         self,
         analysis: Analysis,
         config: UnwrapConfig,
-        baseline_build: _SurfaceBuild,
+        baseline_build: SurfaceBuild,
     ) -> ObservedSurfaceBuild:
         measurements = _baseline_measurements(baseline_build.measurements)
         artifacts = dict(baseline_build.artifacts)
@@ -217,7 +208,7 @@ class ObservedSurfaceBuilder:
 
     def _fallback(
         self,
-        baseline_build: _SurfaceBuild,
+        baseline_build: SurfaceBuild,
         measurements: dict[str, float | int | str | list[float] | list[int]],
         artifacts: dict[str, object],
         branch_rejected: list[dict[str, float | int | str]],
@@ -249,8 +240,11 @@ class ObservedSurfaceBuilder:
         measurements["observed_branch_used_angular_steps"] = int(used_steps)
         measurements["observed_branch_used_phase_correlation"] = int(used_phase_correlation)
         measurements["observed_branch_used_bbox_fallback"] = int(used_bbox_fallback)
-        measurements["observed_branch_coverage_fraction"] = float(
-            baseline_build.measurements.get("observed_coverage_fraction", coverage_fraction(baseline_build.coverage))
+        baseline_metric = baseline_build.measurements.get("observed_coverage_fraction")
+        measurements["observed_branch_coverage_fraction"] = (
+            float(baseline_metric)
+            if isinstance(baseline_metric, (int, float))
+            else coverage_fraction(baseline_build.coverage)
         )
         measurements["observed_branch_overlap_conflict_fraction"] = 0.0
         measurements["observed_branch_mean_gradient_gain"] = 0.0
@@ -276,7 +270,7 @@ class ObservedSurfaceBuilder:
         selected: list[_PreparedFrame],
         fragments: list[tuple[np.ndarray, np.ndarray]],
         config: UnwrapConfig,
-        baseline_build: _SurfaceBuild,
+        baseline_build: SurfaceBuild,
     ) -> tuple[list[float], bool, bool, bool]:
         if len(selected) <= 1:
             return [0.0], False, False, False
@@ -434,13 +428,13 @@ def _force_minimum_selection(frames: list[_PreparedFrame], minimum: int) -> list
     indices = np.linspace(0, len(frames) - 1, minimum)
     selected_indices: list[int] = []
     for index in indices:
-        rounded = int(round(float(index)))
-        if rounded not in selected_indices:
-            selected_indices.append(rounded)
+        rounded_index = round(float(index))
+        if rounded_index not in selected_indices:
+            selected_indices.append(rounded_index)
     if len(selected_indices) < minimum:
-        for index in range(len(frames)):
-            if index not in selected_indices:
-                selected_indices.append(index)
+        for candidate_index in range(len(frames)):
+            if candidate_index not in selected_indices:
+                selected_indices.append(candidate_index)
             if len(selected_indices) == minimum:
                 break
     selected_indices.sort()
@@ -528,7 +522,7 @@ def _compose_mosaic(
     scale = 1.0
     if span > canvas_width and span > 0:
         scale = max((canvas_width - 1) / span, 0.05)
-    positions = [max(int(round((position - minimum) * scale)), 0) for position in raw_positions]
+    positions = [max(round((position - minimum) * scale), 0) for position in raw_positions]
     canvas = np.zeros((canvas_height, canvas_width, 3), np.uint8)
     coverage = np.zeros((canvas_height, canvas_width), np.uint8)
     owner = np.zeros((canvas_height, canvas_width), np.uint16)
@@ -538,7 +532,7 @@ def _compose_mosaic(
         patch_image = image
         patch_mask = mask
         if scale != 1.0:
-            target_width = max(8, int(round(image.shape[1] * scale)))
+            target_width = max(8, round(image.shape[1] * scale))
             patch_image = cv2.resize(image, (target_width, canvas_height), interpolation=cv2.INTER_AREA)
             patch_mask = cv2.resize(mask, (target_width, canvas_height), interpolation=cv2.INTER_NEAREST)
         if left >= canvas_width:
@@ -603,17 +597,20 @@ def _best_vertical_seam(
     if not columns.size:
         return None
     scores: list[float] = []
-    for column in columns:
-        mask = overlap[:, column]
+    for candidate_column in columns:
+        mask = overlap[:, candidate_column]
         difference = np.mean(
-            np.abs(current[:, column][mask].astype(np.float32) - candidate[:, column][mask].astype(np.float32))
+            np.abs(
+                current[:, candidate_column][mask].astype(np.float32)
+                - candidate[:, candidate_column][mask].astype(np.float32)
+            )
         )
         scores.append(float(difference))
     best = int(np.argmin(scores))
     # Move the seam slightly into the candidate so the new fragment contributes
     # a coherent central region instead of only a thin tail.
-    column = min(int(columns[best]) + 16, candidate.shape[1] - 1)
-    return column, float(scores[best])
+    seam_column = min(int(columns[best]) + 16, int(candidate.shape[1]) - 1)
+    return seam_column, float(scores[best])
 
 
 def _gradient_energy(image: np.ndarray, coverage: np.ndarray) -> float:

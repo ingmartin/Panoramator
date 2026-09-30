@@ -36,7 +36,7 @@ class Analysis:
     message: str = ""
     recommendation: str = ""
     rejected_frames: list[dict[str, float | int | str]] | None = None
-    measurements: dict[str, float | int] | None = None
+    measurements: dict[str, float | int | str] | None = None
 
 
 class VideoAnalyzer:
@@ -53,7 +53,12 @@ class VideoAnalyzer:
             if config.surface_kind is SurfaceKind.CYLINDRICAL:
                 core_mask, nuisance_mask = geometry_mask.copy(), np.zeros_like(geometry_mask)
                 points = cv2.findNonZero(core_mask)
-                bbox = cv2.boundingRect(points) if points is not None else None
+                bbox: tuple[int, int, int, int] | None
+                if points is None:
+                    bbox = None
+                else:
+                    box_x, box_y, box_width, box_height = cv2.boundingRect(points)
+                    bbox = (int(box_x), int(box_y), int(box_width), int(box_height))
             else:
                 core_mask, nuisance_mask = _core_body_masks(geometry_mask)
                 bbox = stable_surface_bbox(core_mask)
@@ -86,8 +91,10 @@ class VideoAnalyzer:
         # pixels, but that criterion can discard useful texture from a rotating
         # cylinder before its angular motion has been estimated.  Curved/auto
         # analysis keeps the existing decimator and behavior.
+        rejected: list[dict[str, float | int | str]] = []
+        decimation_measurements: dict[str, float | int]
         if config.surface_kind is SurfaceKind.CYLINDRICAL:
-            selected, rejected, decimation_measurements = sharp, [], {
+            selected, decimation_measurements = sharp, {
                 "temporal_decimation_applied": 0,
                 "temporal_decimation_kept_frames": len(sharp),
                 "temporal_decimation_rejected_frames": 0,
@@ -97,7 +104,7 @@ class VideoAnalyzer:
         if len(selected) < 2:
             selected = [sharp[0], sharp[-1]]
         kind = config.surface_kind
-        measurements = {**(decimation_measurements or {})}
+        measurements: dict[str, float | int | str] = {**(decimation_measurements or {})}
         if kind is SurfaceKind.AUTO:
             family = _select_surface_family(selected)
             kind = SurfaceKind(str(family["surface_family_validated"]))
@@ -292,7 +299,9 @@ def _select_surface_family(frames: list[AnalyzedFrame]) -> dict[str, float | str
     width_score = _bounded_score(float(np.mean(width_stability)), 0.28)
     sidewall_score = _bounded_score(float(np.mean(sidewall_jitter)), 0.12)
     protrusion_score = _bounded_score(float(np.mean(protrusions)), 0.34)
-    axis_score = _bounded_score(float(np.std(axes) / max(np.median(widths), 1.0)), 0.22)
+    width_median = max(float(np.median(widths)), 1.0)
+    axis_stability = float(np.std(axes)) / width_median
+    axis_score = _bounded_score(axis_stability, 0.22)
 
     candidate = SurfaceKind.CYLINDRICAL if 0.3 <= aspect_median <= 1.95 else SurfaceKind.CURVED
     confidence = float(
@@ -318,7 +327,7 @@ def _select_surface_family(frames: list[AnalyzedFrame]) -> dict[str, float | str
         "core_body_width_stability": round(float(np.mean(width_stability)), 6),
         "core_body_sidewall_jitter": round(float(np.mean(sidewall_jitter)), 6),
         "nuisance_region_ratio": round(float(np.mean(protrusions)), 6),
-        "core_body_axis_stability": round(float(np.std(axes) / max(np.median(widths), 1.0)), 6),
+        "core_body_axis_stability": round(axis_stability, 6),
     }
 
 

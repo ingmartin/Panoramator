@@ -51,7 +51,9 @@ def cylindrical_object_mask(image: np.ndarray, min_area_ratio: float = 0.025) ->
     if min(height, width) < 80:
         return object_mask(image, min_area_ratio)
     scale = min(1.0, 480.0 / max(height, width))
-    small = image if scale == 1.0 else cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    small = image if scale == 1.0 else np.asarray(
+        cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    )
     small_height, small_width = small.shape[:2]
     labels = np.full((small_height, small_width), cv2.GC_BGD, dtype=np.uint8)
     labels[int(small_height * 0.18) : int(small_height * 0.94), int(small_width * 0.08) : int(small_width * 0.92)] = cv2.GC_PR_FGD
@@ -59,11 +61,13 @@ def cylindrical_object_mask(image: np.ndarray, min_area_ratio: float = 0.025) ->
     background = np.zeros((1, 65), dtype=np.float64)
     foreground = np.zeros((1, 65), dtype=np.float64)
     try:
-        cv2.grabCut(small, labels, None, background, foreground, 1, cv2.GC_INIT_WITH_MASK)
+        cv2.grabCut(small, labels, (0, 0, 0, 0), background, foreground, 1, cv2.GC_INIT_WITH_MASK)
     except cv2.error:
         return object_mask(image, min_area_ratio)
     mask = np.where((labels == cv2.GC_FGD) | (labels == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
+    mask = np.asarray(
+        cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
+    )
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     image_area = float(small_width * small_height)
     candidates = []
@@ -84,7 +88,7 @@ def cylindrical_object_mask(image: np.ndarray, min_area_ratio: float = 0.025) ->
     selected = np.zeros_like(mask)
     cv2.drawContours(selected, [max(candidates, key=lambda item: item[0])[1]], -1, 255, thickness=cv2.FILLED)
     if scale != 1.0:
-        selected = cv2.resize(selected, (width, height), interpolation=cv2.INTER_NEAREST)
+        selected = np.asarray(cv2.resize(selected, (width, height), interpolation=cv2.INTER_NEAREST))
     if cv2.countNonZero(selected) < height * width * min_area_ratio:
         return object_mask(image, min_area_ratio)
     return selected

@@ -32,16 +32,20 @@ def format_root_help(parser: argparse.ArgumentParser) -> str:
     return "\n\n".join(
         [
             parser.format_help().rstrip(),
-            "Examples:\n"
-            "  panoramator build video.mp4 output.png\n"
-            "  panoramator build video.mp4 output.png --capture-mode rotation --horizontal-fov-degrees 70\n"
-            "  panoramator unwrap video.mp4 surface.png --surface auto --allow-partial\n"
-            "  panoramator unwrap video.mp4 surface.webp --publish-profile coverage_first --photo-mode",
-            "Command help:\n"
-            "  panoramator build -h\n"
-            "  panoramator unwrap -h\n"
-            "  panoramator inspect-video -h\n"
-            "  panoramator export-config -h",
+            (
+                "Examples:\n"
+                "  panoramator build video.mp4 output.png\n"
+                "  panoramator build video.mp4 output.png --capture-mode rotation --horizontal-fov-degrees 70\n"
+                "  panoramator unwrap video.mp4 surface.png --surface auto --allow-partial\n"
+                "  panoramator unwrap video.mp4 surface.webp --publish-profile coverage_first --photo-mode"
+            ),
+            (
+                "Command help:\n"
+                "  panoramator build -h\n"
+                "  panoramator unwrap -h\n"
+                "  panoramator inspect-video -h\n"
+                "  panoramator export-config -h"
+            ),
         ]
     )
 
@@ -76,8 +80,10 @@ def inspect_video_command(args: argparse.Namespace) -> int:
     from panoramator.io.video import OpenCVVideoSource
 
     source = OpenCVVideoSource(args.video_path, PanoramaConfig())
-    metadata = source.open()
-    source.close()
+    try:
+        metadata = source.open()
+    finally:
+        source.close()
     print(f"path={metadata.path}")
     print(f"fps={metadata.fps}")
     print(f"frame_count={metadata.frame_count}")

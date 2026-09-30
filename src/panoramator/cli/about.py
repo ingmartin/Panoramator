@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import importlib.metadata
 import os
-from pathlib import Path
 import sys
 import tomllib
+from pathlib import Path
 
 import cv2
 

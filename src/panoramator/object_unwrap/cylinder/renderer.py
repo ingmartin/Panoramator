@@ -139,9 +139,9 @@ def render_inverse_cylindrical_atlas(
             source_map,
             max_gap=max_interpolation_gap_px,
         )
-    valid_columns = np.flatnonzero(np.any(coverage > 0, axis=0))
-    if len(valid_columns) >= 2:
-        ordered = np.sort(valid_columns)
+    occupied_columns = np.flatnonzero(np.any(coverage > 0, axis=0))
+    if len(occupied_columns) >= 2:
+        ordered = np.sort(occupied_columns)
         for left, right in itertools.pairwise(ordered):
             gap = int(right - left)
             if gap <= 1:
@@ -159,9 +159,9 @@ def render_inverse_cylindrical_atlas(
         result[coverage == 0] = 0
     # The temporal trajectory is solved in capture order; publication uses the
     # opposite horizontal convention so the first visible side is on the right.
-    result = cv2.flip(result, 1)
-    coverage = cv2.flip(coverage, 1)
-    source_map = cv2.flip(source_map, 1)
+    result = np.asarray(cv2.flip(result, 1))
+    coverage = np.asarray(cv2.flip(coverage, 1))
+    source_map = np.asarray(cv2.flip(source_map, 1))
     if full_cycle and np.any(coverage) and output_width > 16:
         result, coverage, source_map = _move_seam(result, coverage, source_map)
 
@@ -322,7 +322,10 @@ def render_adaptive_slit_cylindrical_atlas(
                 owner_columns[target_x] = samples[0][2]
             else:
                 weights /= weights.sum()
-                result[:, target_x, :] = sum(sample * weight for (sample, _, _), weight in zip(samples, weights, strict=True)).astype(np.uint8)
+                result[:, target_x, :] = np.sum(
+                    np.stack([sample * float(weight) for (sample, _, _), weight in zip(samples, weights, strict=True)]),
+                    axis=0,
+                ).astype(np.uint8)
                 owner_columns[target_x] = samples[0][2]
         valid_columns[target_x] = True
         coverage[:, target_x] = 255
@@ -336,11 +339,11 @@ def render_adaptive_slit_cylindrical_atlas(
         )
     result[coverage == 0] = 0
     if np.any(valid_columns):
-        result = cv2.GaussianBlur(result, (9, 1), 0)
+        result = np.asarray(cv2.GaussianBlur(result, (9, 1), 0))
         result[coverage == 0] = 0
-    result = cv2.flip(result, 1)
-    coverage = cv2.flip(coverage, 1)
-    source_map = cv2.flip(source_map, 1)
+    result = np.asarray(cv2.flip(result, 1))
+    coverage = np.asarray(cv2.flip(coverage, 1))
+    source_map = np.asarray(cv2.flip(source_map, 1))
     if full_cycle and np.any(coverage) and output_width > 16:
         result, coverage, source_map = _move_seam(result, coverage, source_map)
 
@@ -402,7 +405,7 @@ def _select_single_cycle(
     selected_offsets = (
         [float(vertical_offsets[index]) for index in selected]
         if vertical_offsets is not None and len(vertical_offsets) == len(frames)
-        else vertical_offsets
+        else list(vertical_offsets) if vertical_offsets is not None else None
     )
     return selected_frames, selected_angles, selected_offsets
 
@@ -493,11 +496,21 @@ def _prepare_frames(
         if vertical_offsets is not None and frame_index < len(vertical_offsets):
             offset = float(vertical_offsets[frame_index])
             if abs(offset) > 0.25:
-                transform = np.float32([[1.0, 0.0, 0.0], [0.0, 1.0, -offset]])
-                crop = cv2.warpAffine(crop, transform, (crop.shape[1], crop.shape[0]), borderMode=cv2.BORDER_REPLICATE)
-                mask = cv2.warpAffine(mask, transform, (mask.shape[1], mask.shape[0]), flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT)
-        crop = cv2.resize(crop, (fixed_width, output_height), interpolation=cv2.INTER_AREA)
-        mask = cv2.resize(mask, (fixed_width, output_height), interpolation=cv2.INTER_NEAREST)
+                transform = np.asarray([[1.0, 0.0, 0.0], [0.0, 1.0, -offset]], dtype=np.float32)
+                crop = np.asarray(
+                    cv2.warpAffine(crop, transform, (int(crop.shape[1]), int(crop.shape[0])), borderMode=cv2.BORDER_REPLICATE)
+                )
+                mask = np.asarray(
+                    cv2.warpAffine(
+                        mask,
+                        transform,
+                        (int(mask.shape[1]), int(mask.shape[0])),
+                        flags=cv2.INTER_NEAREST,
+                        borderMode=cv2.BORDER_CONSTANT,
+                    )
+                )
+        crop = np.asarray(cv2.resize(crop, (fixed_width, output_height), interpolation=cv2.INTER_AREA))
+        mask = np.asarray(cv2.resize(mask, (fixed_width, output_height), interpolation=cv2.INTER_NEAREST))
         sharpness = float(np.clip(0.65 + np.sqrt(float(sharpness_value) / sharpness_scale) * 0.25, 0.65, 1.25))
         prepared.append((crop, mask.astype(np.float32) / 255.0, float(angle), sharpness))
     if not prepared:

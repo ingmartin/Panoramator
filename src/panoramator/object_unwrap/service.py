@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -10,12 +11,13 @@ from panoramator.config.models import PanoramaConfig
 from panoramator.io.video import OpenCVVideoSource
 from panoramator.postprocess.crop import crop_with_policy
 
-from .analyzer import Analysis, VideoAnalyzer
+from .analyzer import Analysis, AnalyzedFrame, VideoAnalyzer
 from .coverage import coverage_fraction
 from .curved.builder import CurvedSurfaceBuilder, CurvedSurfaceFallbackBuilder
 from .cylinder.builder import CylinderUnwrapBuilder
 from .diagnostics import write_artifacts
 from .models import (
+    SurfaceBuild,
     SurfaceKind,
     SurfaceModel,
     SurfaceOutputMode,
@@ -26,6 +28,12 @@ from .models import (
 )
 from .observed_surface import ObservedSurfaceBuilder
 from .product_surface import ProductSurfaceBuilder
+
+# Preserve the historical private import path while keeping the shared
+# intermediate model in the unwrap domain layer.
+_SurfaceBuild = SurfaceBuild
+
+_RECOVERABLE_SURFACE_BUILD_ERRORS = (ValueError, RuntimeError, cv2.error, np.linalg.LinAlgError)
 
 
 def _observed_candidate_passes(
@@ -50,16 +58,6 @@ def _observed_candidate_passes(
         and isinstance(largest, (int, float))
         and float(largest) >= 0.82
     )
-
-
-@dataclass(slots=True)
-class _SurfaceBuild:
-    image: np.ndarray
-    coverage: np.ndarray
-    model: SurfaceModel
-    measurements: dict[str, float | int | str | list[float] | list[int]]
-    artifacts: dict[str, object]
-    fallback_used: bool
 
 
 @dataclass(slots=True)
@@ -183,7 +181,7 @@ class ObjectUnwrapper:
                 )
                 self._ensure_surface_artifacts(selected)
                 return selected
-            except Exception as error:
+            except _RECOVERABLE_SURFACE_BUILD_ERRORS as error:
                 measurements = dict(baseline_build.measurements)
                 measurements.update(
                     {
@@ -211,9 +209,10 @@ class ObjectUnwrapper:
                 )
                 self._ensure_surface_artifacts(selected)
                 return selected
+        observed_build: SurfaceBuild
         try:
-            observed = ObservedSurfaceBuilder().build(analysis, self.config, baseline_build)
-        except Exception:
+            observed_build = ObservedSurfaceBuilder().build(analysis, self.config, baseline_build)
+        except _RECOVERABLE_SURFACE_BUILD_ERRORS as error:
             measurements = dict(baseline_build.measurements)
             for key, value in baseline_build.measurements.items():
                 measurements.setdefault(f"baseline_{key}", value)
@@ -222,6 +221,7 @@ class ObjectUnwrapper:
                     "observed_branch_input_frame_count": len(analysis.frames),
                     "observed_branch_applied": 0,
                     "observed_branch_abort_reason": "branch_build_failed",
+                    "observed_branch_exception": type(error).__name__,
                     "observed_branch_axis_valid_frame_count": 0,
                     "observed_branch_selected_frame_count": 0,
                     "observed_branch_redundant_frame_count": 0,
@@ -231,18 +231,20 @@ class ObjectUnwrapper:
                     "observed_branch_used_angular_steps": 0,
                     "observed_branch_used_phase_correlation": 0,
                     "observed_branch_used_bbox_fallback": 0,
-                    "observed_branch_coverage_fraction": float(
-                        baseline_build.measurements.get(
-                            "observed_coverage_fraction",
-                            coverage_fraction(baseline_build.coverage),
+                    "observed_branch_coverage_fraction": (
+                        float(metric)
+                        if isinstance(
+                            metric := baseline_build.measurements.get("observed_coverage_fraction"),
+                            (int, float),
                         )
+                        else coverage_fraction(baseline_build.coverage)
                     ),
                     "observed_branch_overlap_conflict_fraction": 0.0,
                     "observed_branch_mean_gradient_gain": 0.0,
                     "observed_branch_largest_component_fraction": 0.0,
                 }
             )
-            observed = _SurfaceBuild(
+            observed_build = _SurfaceBuild(
                 baseline_build.image,
                 baseline_build.coverage,
                 baseline_build.model,
@@ -259,21 +261,22 @@ class ObjectUnwrapper:
                 baseline_build.fallback_used,
             )
         observed_build = _SurfaceBuild(
-            observed.image,
-            observed.coverage,
-            observed.model,
-            observed.measurements,
-            observed.artifacts,
+            observed_build.image,
+            observed_build.coverage,
+            observed_build.model,
+            observed_build.measurements,
+            observed_build.artifacts,
             baseline_build.fallback_used,
         )
         try:
             product = ProductSurfaceBuilder().build(analysis, self.config, baseline_build)
             product_measurements = product.measurements
             product_artifacts = product.artifacts
-        except Exception:
+        except _RECOVERABLE_SURFACE_BUILD_ERRORS as error:
             product_measurements = {
                 "product_surface_quality_gate_passed": 0,
                 "product_surface_rejected_reason": "product_surface_build_failed",
+                "product_surface_exception": type(error).__name__,
                 "product_surface_selected_frame_count": 0,
             }
             product_artifacts = {
@@ -355,8 +358,8 @@ class ObjectUnwrapper:
             mask = item.publish_mask[y : y + box_height, x : x + box_width]
             if crop.size and box_height > 0:
                 target_width = max(1, min(width, round(box_width * height / max(box_height, 1))))
-                image = cv2.resize(crop, (target_width, height), interpolation=cv2.INTER_AREA)
-                coverage = cv2.resize(mask, (target_width, height), interpolation=cv2.INTER_NEAREST)
+                image = np.asarray(cv2.resize(crop, (target_width, height), interpolation=cv2.INTER_AREA))
+                coverage = np.asarray(cv2.resize(mask, (target_width, height), interpolation=cv2.INTER_NEAREST))
                 artifacts["curved_baseline_source"] = coverage.copy()
         observed = coverage.copy()
         artifacts.update(
@@ -374,7 +377,7 @@ class ObjectUnwrapper:
             "observed_coverage_fraction": observed_fraction,
             "surface_observed_coverage_fraction": observed_fraction,
             "surface_synthetic_fraction": 0.0,
-            "surface_unknown_fraction": coverage_fraction(artifacts["surface_unknown"]),
+            "surface_unknown_fraction": coverage_fraction(np.asarray(artifacts["surface_unknown"])),
             "frame_count": len(analysis.frames),
         }
         return _SurfaceBuild(image, coverage, model, measurements, artifacts, False)
@@ -662,7 +665,7 @@ class ObjectUnwrapper:
         )
 
     @staticmethod
-    def _frame_list(frames: list[object]) -> list[dict[str, float | int]]:
+    def _frame_list(frames: Sequence[AnalyzedFrame]) -> list[dict[str, float | int]]:
         return [
             {
                 "frame_index": item.frame.index,

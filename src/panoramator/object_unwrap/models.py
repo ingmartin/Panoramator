@@ -51,6 +51,18 @@ class SurfaceModel:
 
 
 @dataclass(slots=True)
+class SurfaceBuild:
+    """Intermediate surface candidate shared by unwrap builders."""
+
+    image: np.ndarray
+    coverage: np.ndarray
+    model: SurfaceModel
+    measurements: dict[str, float | int | str | list[float] | list[int]]
+    artifacts: dict[str, object]
+    fallback_used: bool = False
+
+
+@dataclass(slots=True)
 class UnwrapDiagnostics:
     status: UnwrapStatus
     message: str

@@ -149,6 +149,39 @@ def test_build_from_frames_decodes_only_bounded_uniform_sample(monkeypatch, tmp_
     assert result.used_frames == 2
 
 
+def test_build_from_frames_rejects_malformed_input_without_aborting_batch(tmp_path: Path) -> None:
+    builder = PanoramaBuilder(
+        PanoramaConfig(
+            capture_mode="linear",
+            blur_threshold=0,
+            min_difference=0,
+            crop_result=False,
+            save_debug_artifacts=False,
+            enable_final_sharpening=False,
+        )
+    )
+    _stub_builder(builder)
+
+    def _keep_rejected(frames, rejected, callbacks):
+        chain = _chain()
+        chain.rejected_frames = rejected
+        return chain
+
+    cast(Any, builder)._build_best_chain_from_frames = _keep_rejected
+
+    result = builder.build_from_frames(
+        [
+            np.zeros((4, 4, 3), dtype=np.uint8),
+            np.zeros((4, 4), dtype=np.uint8),
+            np.ones((4, 4, 3), dtype=np.uint8),
+        ],
+        tmp_path / "panorama.png",
+    )
+
+    assert any(item["reason"] == "decode_error" for item in result.diagnostics.rejected_frames)
+    assert result.metadata.frame_count == 3
+
+
 def test_atomic_save_keeps_previous_output_when_encoding_fails(tmp_path: Path, monkeypatch) -> None:
     output = tmp_path / "panorama.png"
     output.write_bytes(b"previous")

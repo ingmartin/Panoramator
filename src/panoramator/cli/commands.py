@@ -48,7 +48,7 @@ def _literal_value(value: object) -> ValueFactory:
     return lambda _args, _dest: value
 
 
-def _enum_value(enum_type: type[SurfaceKind] | type[PublishProfile] | type[SurfaceOutputMode]) -> ValueFactory:
+def _enum_value(enum_type: type[SurfaceKind | PublishProfile | SurfaceOutputMode]) -> ValueFactory:
     return lambda args, dest: enum_type(getattr(args, dest))
 
 

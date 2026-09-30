@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import itertools
+
 import cv2
 import numpy as np
 import pytest
@@ -9,21 +11,21 @@ from panoramator.object_unwrap.analyzer import Analysis, AnalyzedFrame
 from panoramator.object_unwrap.models import SurfaceKind, SurfaceModel, UnwrapConfig
 from panoramator.object_unwrap.product_surface import (
     ProductSurfaceBuilder,
-    _Registration,
-    _Strip,
     _compose,
     _owner_reentry_count,
     _phase_cell_bounds,
+    _Registration,
     _registration_gap_map,
-    _warp_strip_with_registration,
+    _Strip,
     _vertical_measurements,
+    _warp_strip_with_registration,
     cylindrical_surface_support_mask,
     extract_central_strip,
     find_seam,
     monotonic_offsets,
     photometric_normalize,
-    repack_registered_offsets,
     register_strips,
+    repack_registered_offsets,
 )
 from panoramator.object_unwrap.service import _SurfaceBuild
 
@@ -53,7 +55,7 @@ def test_central_strip_extraction_does_not_use_bbox_edges() -> None:
 
     assert strip is not None
     assert strip.image.shape[:2] == strip.mask.shape
-    assert strip.width < int(round(48 * 128 / 49))
+    assert strip.width < round(48 * 128 / 49)
 
 
 def test_monotonic_offsets_keep_one_orbit_direction() -> None:
@@ -63,7 +65,7 @@ def test_monotonic_offsets_keep_one_orbit_direction() -> None:
     offsets = monotonic_offsets(valid, 128)
 
     assert offsets[0] == 0.0
-    assert all(right > left for left, right in zip(offsets, offsets[1:]))
+    assert all(right > left for left, right in itertools.pairwise(offsets))
 
 
 def test_seam_search_prefers_low_conflict_column() -> None:
@@ -234,9 +236,9 @@ def test_register_strips_builds_dense_monotonic_phase(monkeypatch) -> None:
     selected, offsets, records = register_strips(valid, 128, 49.0)
 
     assert len(selected) == len(valid)
-    assert all(right > left for left, right in zip(offsets, offsets[1:]))
+    assert all(right > left for left, right in itertools.pairwise(offsets))
     phases = [float(record["phase_atlas_px"]) for record in records]
-    assert all(right >= left for left, right in zip(phases, phases[1:]))
+    assert all(right >= left for left, right in itertools.pairwise(phases))
     assert all(record["keyframe_selected"] == 1 for record in records)
 
 
@@ -280,7 +282,7 @@ def test_phase_cells_are_disjoint_and_cover_the_atlas_span() -> None:
     assert cells[0][0] == 0
     assert cells[-1][1] == 36
     assert all(left <= right for left, right in cells)
-    assert all(right <= next_left for (_, right), (next_left, _) in zip(cells[:-1], cells[1:], strict=True))
+    assert all(right <= next_left for (_, right), (next_left, _) in itertools.pairwise(cells))
 
 
 def test_cylindrical_support_mask_recovers_bright_pixels_inside_component_hull() -> None:

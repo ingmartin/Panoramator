@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
@@ -9,11 +8,8 @@ import numpy as np
 from ..analyzer import Analysis, AnalyzedFrame
 from ..coverage import coverage_fraction
 from ..image_pose_graph import build_image_pose_graph
-from ..models import SurfaceKind, SurfaceModel, UnwrapConfig
+from ..models import SurfaceBuild, SurfaceKind, SurfaceModel, UnwrapConfig
 from ..planar_mosaic import build_planar_mosaic
-
-if TYPE_CHECKING:
-    from ..service import _SurfaceBuild
 
 
 @dataclass(slots=True)
@@ -207,7 +203,7 @@ def _bounded_fill(
 class CurvedSurfaceBuilder:
     """Build a curved observed atlas from local image-space registrations."""
 
-    def build(self, analysis: Analysis, config: UnwrapConfig, baseline_build: _SurfaceBuild) -> CurvedSurfaceBuild:
+    def build(self, analysis: Analysis, config: UnwrapConfig, baseline_build: SurfaceBuild) -> CurvedSurfaceBuild:
         baseline_image = baseline_build.image
         baseline_coverage = baseline_build.coverage
         baseline_model = baseline_build.model
@@ -453,8 +449,8 @@ class CurvedSurfaceFallbackBuilder:
             mask = item.publish_mask[y : y + box_height, x : x + box_width]
             if crop.size and box_height > 0:
                 target_width = max(1, min(width, round(box_width * height / box_height)))
-                image = cv2.resize(crop, (target_width, height), interpolation=cv2.INTER_AREA)
-                coverage = cv2.resize(mask, (target_width, height), interpolation=cv2.INTER_NEAREST)
+                image = np.asarray(cv2.resize(crop, (target_width, height), interpolation=cv2.INTER_AREA))
+                coverage = np.asarray(cv2.resize(mask, (target_width, height), interpolation=cv2.INTER_NEAREST))
                 artifacts["curved_baseline_source"] = coverage.copy()
         observed = np.where(coverage > 0, 255, 0).astype(np.uint8)
         unknown = np.where(coverage > 0, 0, 255).astype(np.uint8)

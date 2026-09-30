@@ -21,8 +21,8 @@ from panoramator.domain.models import (
     Frame,
     FrameQuality,
     MatchSet,
-    PanoramaDiagnostics,
     PairGeometry,
+    PanoramaDiagnostics,
     SelectedFrame,
     VideoMetadata,
 )
@@ -39,6 +39,30 @@ def _selected_frame(index: int) -> SelectedFrame:
         frame=Frame(index=index, timestamp_seconds=float(index), image=np.zeros((4, 4, 3), dtype=np.uint8)),
         quality=FrameQuality(sharpness=10.0 + index, difference_score=float(index), accepted=True, reason="selected"),
     )
+
+
+def test_read_metadata_closes_video_source_when_open_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    from panoramator.application import use_cases
+
+    instances = []
+
+    class FakeSource:
+        def __init__(self, *args) -> None:
+            self.closed = False
+            instances.append(self)
+
+        def open(self):
+            raise RuntimeError("metadata failure")
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(use_cases, "OpenCVVideoSource", FakeSource)
+
+    with pytest.raises(RuntimeError, match="metadata failure"):
+        PanoramaBuilder(PanoramaConfig(save_debug_artifacts=False))._read_metadata("input.mp4")
+
+    assert instances and instances[0].closed is True
 
 
 def test_build_from_video_requires_two_selected_frames(tmp_path) -> None:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
@@ -9,12 +9,8 @@ import numpy as np
 from .analyzer import Analysis, AnalyzedFrame
 from .coverage import coverage_fraction
 from .gap_fill import interpolate_surface_gaps
-from .models import SurfaceKind, SurfaceModel, UnwrapConfig
+from .models import SurfaceBuild, SurfaceKind, SurfaceModel, UnwrapConfig
 from .observed_surface import _largest_component, _publish_mask
-
-if TYPE_CHECKING:
-    from .service import _SurfaceBuild
-
 
 _VERTICAL_MIN_SCALE = 0.75
 _VERTICAL_MAX_SCALE = 1.25
@@ -22,6 +18,14 @@ _PRODUCT_STRIP_RATIO = 0.14
 _PRODUCT_STRIP_RATIOS = (0.14, 0.20, 0.26)
 _WHITE_DIAGNOSTIC_THRESHOLD = 180
 _WHITE_PROTECTION_THRESHOLD = 160
+
+
+def _numeric_float(value: object, default: float = 0.0) -> float:
+    return float(value) if isinstance(value, (int, float)) else default
+
+
+def _numeric_int(value: object, default: int = 0) -> int:
+    return int(value) if isinstance(value, (int, float)) else default
 
 
 @dataclass(slots=True)
@@ -155,13 +159,13 @@ def extract_central_strip(
         target_height = output_height
     else:
         scale = output_height / max(reference.height, 1.0)
-        target_height = max(1, int(round(height * scale)))
+        target_height = max(1, round(height * scale))
         # Every strip gets the same atlas centre.  The source bbox can move
         # vertically as the camera orbits; using its raw top as the canvas
         # origin would turn that motion into a saw-tooth seam.  The source
         # centre is retained as a residual diagnostic instead.
-        target_top = int(round((output_height - target_height) * 0.5))
-    normalized_width = max(8, int(round(width * scale)))
+        target_top = round((output_height - target_height) * 0.5)
+    normalized_width = max(8, round(width * scale))
     resized_image = cv2.resize(image_crop, (normalized_width, target_height), interpolation=cv2.INTER_AREA)
     resized_mask = cv2.resize(mask_crop, (normalized_width, target_height), interpolation=cv2.INTER_NEAREST)
     image_canvas = np.zeros((output_height, normalized_width, 3), np.uint8)
@@ -176,7 +180,7 @@ def extract_central_strip(
     mask_canvas[source_top:source_bottom] = resized_mask[crop_top:crop_bottom]
     image_crop = image_canvas
     mask_crop = mask_canvas
-    strip_width = int(round(normalized_width * float(np.clip(ratio, 0.10, 0.30))))
+    strip_width = round(normalized_width * float(np.clip(ratio, 0.10, 0.30)))
     strip_width = max(8, min(strip_width, normalized_width))
     left = max(0, (normalized_width - strip_width) // 2)
     right = min(normalized_width, left + strip_width)
@@ -189,7 +193,6 @@ def extract_central_strip(
     if valid_fraction < 0.35:
         return None
     strip[strip_mask == 0] = 0
-    target_bottom = target_top + target_height
     return _Strip(
         strip,
         strip_mask,
@@ -280,22 +283,20 @@ def _vertical_measurements(
         dtype=np.float32,
     )
     reference_center = float(np.median(centre_values))
-    for item in measurements:
-        height = float(item["source_height"])
-        scale = height / reference_height
-        target_height = height * (output_height / reference_height)
-        target_top = (output_height - target_height) * 0.5
+    for measurement in measurements:
+        measurement_height = float(measurement["source_height"])
+        scale = measurement_height / reference_height
         centre_residual = abs(
-            (float(item["source_top"]) + height * 0.5) - reference_center
+            (float(measurement["source_top"]) + measurement_height * 0.5) - reference_center
         ) * (output_height / reference_height)
-        item["vertical_scale"] = scale
-        item["vertical_height_ratio"] = scale
-        item["vertical_height_valid"] = int(_VERTICAL_MIN_SCALE <= scale <= _VERTICAL_MAX_SCALE)
-        item["reference_top"] = reference_top
-        item["reference_height"] = reference_height
-        item["estimated_top_residual_px"] = centre_residual
-        item["estimated_bottom_residual_px"] = centre_residual
-        item["reference_center"] = reference_center
+        measurement["vertical_scale"] = scale
+        measurement["vertical_height_ratio"] = scale
+        measurement["vertical_height_valid"] = int(_VERTICAL_MIN_SCALE <= scale <= _VERTICAL_MAX_SCALE)
+        measurement["reference_top"] = reference_top
+        measurement["reference_height"] = reference_height
+        measurement["estimated_top_residual_px"] = centre_residual
+        measurement["estimated_bottom_residual_px"] = centre_residual
+        measurement["reference_center"] = reference_center
     return _VerticalReference(
         reference_top,
         reference_height,
@@ -312,8 +313,8 @@ def _vertical_plot(values: list[float], height: int = 160, width: int = 640) -> 
     low, high = min(values), max(values)
     span = max(high - low, 1e-6)
     for index, value in enumerate(values):
-        x = int(round(index * (width - 1) / max(len(values) - 1, 1)))
-        y = int(round((high - value) / span * (height - 20))) + 10
+        x = round(index * (width - 1) / max(len(values) - 1, 1))
+        y = round((high - value) / span * (height - 20)) + 10
         cv2.circle(canvas, (x, y), 3, (40, 80, 220), -1)
     return canvas
 
@@ -322,7 +323,7 @@ def _registration_view(item: AnalyzedFrame) -> tuple[np.ndarray, int, int]:
     """Return an expanded object crop used only for frame registration."""
 
     x, y, width, height = item.bbox
-    margin = max(8, int(round(max(width, height) * 0.10)))
+    margin = max(8, round(max(width, height) * 0.10))
     left = max(0, x - margin)
     top = max(0, y - margin)
     right = min(item.frame.image.shape[1], x + width + margin)
@@ -352,7 +353,7 @@ def estimate_pairwise_registration(
         norm = cv2.NORM_L2
         ratio = 0.75
     else:
-        detector = cv2.ORB_create(nfeatures=1200, fastThreshold=8)
+        detector = cv2.ORB_create(nfeatures=1200, fastThreshold=8)  # type: ignore[attr-defined]
         norm = cv2.NORM_HAMMING
         ratio = 0.72
     left_keypoints, left_descriptors = detector.detectAndCompute(left_gray, None)
@@ -372,8 +373,8 @@ def estimate_pairwise_registration(
             float("inf"),
             "registration_insufficient_matches",
         )
-    left_points = np.float32([left_keypoints[match.queryIdx].pt for match in good])
-    right_points = np.float32([right_keypoints[match.trainIdx].pt for match in good])
+    left_points = np.asarray([left_keypoints[match.queryIdx].pt for match in good], dtype=np.float32)
+    right_points = np.asarray([right_keypoints[match.trainIdx].pt for match in good], dtype=np.float32)
     transform, inlier_mask = cv2.estimateAffinePartial2D(
         right_points,
         left_points,
@@ -387,7 +388,7 @@ def estimate_pairwise_registration(
     inliers = inlier_mask.ravel().astype(bool)
     inlier_count = int(np.count_nonzero(inliers))
     inlier_fraction = float(inlier_count / max(len(good), 1))
-    projected = cv2.transform(right_points[None, :, :], transform)[0]
+    projected = np.asarray(cv2.transform(right_points[None, :, :], transform))[0]
     residual = float(np.median(np.linalg.norm(projected[inliers] - left_points[inliers], axis=1)))
     scale_x = float(np.linalg.norm(transform[0, :2]))
     scale_y = float(np.linalg.norm(transform[1, :2]))
@@ -516,7 +517,6 @@ def register_strips(
     selected = [strips[0]]
     offsets = [0.0]
     last_observed = strips[0]
-    last_offset = 0.0
     phase = 0.0
     records: list[dict[str, float | int | str | list[float]]] = [
         {
@@ -606,7 +606,7 @@ def _registration_gap_map(
 
     occupied = np.zeros(canvas_width, np.uint8)
     for strip, offset in zip(strips, offsets, strict=True):
-        left = max(0, int(round(offset)))
+        left = max(0, round(offset))
         right = min(canvas_width, left + strip.width)
         if right > left:
             occupied[left:right] = 255
@@ -623,8 +623,8 @@ def _phase_cell_bounds(strips: list[_Strip], offsets: list[float], canvas_width:
     if not strips:
         return []
     centres = [float(offset + strip.width * 0.5) for strip, offset in zip(strips, offsets, strict=True)]
-    left_edges = [0] + [int(np.ceil((left + right) * 0.5)) for left, right in zip(centres[:-1], centres[1:], strict=True)]
-    right_edges = [int(np.floor((left + right) * 0.5)) for left, right in zip(centres[:-1], centres[1:], strict=True)] + [canvas_width]
+    left_edges = [0] + [round(np.ceil((left + right) * 0.5)) for left, right in itertools.pairwise(centres)]
+    right_edges = [round(np.floor((left + right) * 0.5)) for left, right in itertools.pairwise(centres)] + [canvas_width]
     return [
         (max(0, min(left, canvas_width)), max(0, min(right, canvas_width)))
         for left, right in zip(left_edges, right_edges, strict=True)
@@ -652,7 +652,7 @@ def _white_atlas_artifacts(
     strip_source_white_pixels = 0
     strip_white_pixels = 0
     for frame_id, (strip, offset) in enumerate(zip(strips, offsets, strict=True), start=1):
-        left = max(0, int(round(offset)))
+        left = max(0, round(offset))
         if left >= canvas_width:
             continue
         width = min(strip.width, canvas_width - left)
@@ -732,7 +732,7 @@ def monotonic_offsets(strips: list[_Strip], output_height: int) -> list[float]:
     if not strips:
         return []
     offsets = [0.0]
-    steps = [_strip_step(left, right, output_height) for left, right in zip(strips[:-1], strips[1:], strict=True)]
+    steps = [_strip_step(left, right, output_height) for left, right in itertools.pairwise(strips)]
     if steps:
         # Median smoothing suppresses one bad segmentation jump while preserving
         # the direction of the one-pass orbit.
@@ -780,7 +780,7 @@ def find_seam(current: np.ndarray, candidate: np.ndarray, overlap: np.ndarray) -
 
     if current.shape[:2] != candidate.shape[:2] or not np.any(overlap):
         return None
-    height, width = overlap.shape
+    height, _width = overlap.shape
     colour_cost = np.mean(np.abs(current.astype(np.float32) - candidate.astype(np.float32)), axis=2) / 255.0
     current_gray = cv2.cvtColor(current, cv2.COLOR_BGR2GRAY).astype(np.float32)
     candidate_gray = cv2.cvtColor(candidate, cv2.COLOR_BGR2GRAY).astype(np.float32)
@@ -898,7 +898,7 @@ def _compose(
     conflict_values: list[float] = []
     seam_scores: list[float] = []
     gains: list[float] = []
-    positions = [max(0, int(round(value))) for value in offsets]
+    positions = [max(0, round(value)) for value in offsets]
     for frame_id, (strip, position) in enumerate(zip(strips, positions, strict=True), start=1):
         if position >= canvas_width:
             continue
@@ -967,7 +967,6 @@ def _compose(
                 for column in range(start, stop):
                     if not overlap[row_index, column]:
                         continue
-                    distance = abs(column - seam_column)
                     local_difference = float(
                         np.mean(np.abs(current[row_index, column].astype(np.float32) - candidate[row_index, column])) / 255.0
                     )
@@ -1004,14 +1003,11 @@ def _compose(
             owner,
             max_gap=max_interpolation_gap_px,
         )
-    product_fraction = coverage_fraction(coverage)
-    largest_fraction = _largest_component_fraction(coverage)
     baseline_energy = _gradient_energy(baseline_image, np.where(np.any(baseline_image > 0, axis=2), 255, 0).astype(np.uint8))
     product_energy = _gradient_energy(image, coverage)
     gradient_ratio = float(product_energy / baseline_energy) if baseline_energy > 1e-6 else 0.0
     mean_conflict = float(np.mean(conflict_values)) if conflict_values else 0.0
     mean_seam = float(np.mean(seam_scores)) if seam_scores else 0.0
-    mean_gain = float(np.mean(gains)) if gains else 0.0
     confidence = np.where(coverage > 0, 255, 0).astype(np.uint8)
     return image, coverage, owner, seam_visual, confidence, mean_conflict, mean_seam, gradient_ratio
 
@@ -1019,7 +1015,7 @@ def _compose(
 class ProductSurfaceBuilder:
     """Build a publishable surface candidate from narrow, ordered frame strips."""
 
-    def build(self, analysis: Analysis, config: UnwrapConfig, baseline_build: _SurfaceBuild) -> ProductSurfaceBuild:
+    def build(self, analysis: Analysis, config: UnwrapConfig, baseline_build: SurfaceBuild) -> ProductSurfaceBuild:
         measurements = dict(baseline_build.measurements)
         for key, value in baseline_build.measurements.items():
             measurements.setdefault(f"baseline_{key}", value)
@@ -1166,7 +1162,7 @@ class ProductSurfaceBuilder:
         vertical_by_frame = {int(item["frame_index"]): item for item in vertical_frames}
         for record in registration_records:
             if record.get("accepted") == 0:
-                frame_index = int(record["right_frame_index"])
+                frame_index = _numeric_int(record.get("right_frame_index"))
                 vertical = vertical_by_frame.get(frame_index)
                 if vertical is not None:
                     vertical["selected"] = 0
@@ -1175,13 +1171,13 @@ class ProductSurfaceBuilder:
                     {
                         "frame_index": frame_index,
                         "reason": str(record.get("reason", "registration_rejected")),
-                        "registration_inlier_fraction": float(record.get("inlier_fraction", 0.0)),
-                        "registration_residual_px": float(record.get("residual_px", float("inf"))),
+                        "registration_inlier_fraction": _numeric_float(record.get("inlier_fraction")),
+                        "registration_residual_px": _numeric_float(record.get("residual_px"), float("inf")),
                     }
                 )
         artifacts["product_surface_registration"] = registration_records
         artifacts["product_surface_registration_steps"] = _vertical_plot(
-            [float(record.get("step_atlas_px", 0.0)) for record in registration_records]
+            [_numeric_float(record.get("step_atlas_px")) for record in registration_records]
         )
         artifacts["product_surface_support_recovery"] = support_recovery
         if len(strips) < 4:
@@ -1267,21 +1263,23 @@ class ProductSurfaceBuilder:
         registration_pairs = registration_records[1:]
         accepted_registration_pairs = [record for record in registration_pairs if record.get("accepted") == 1]
         registration_inlier_fraction = float(
-            np.median([float(record["inlier_fraction"]) for record in accepted_registration_pairs])
+            np.median([_numeric_float(record.get("inlier_fraction")) for record in accepted_registration_pairs])
         ) if accepted_registration_pairs else 0.0
         registration_residual = float(
-            np.median([float(record["residual_px"]) for record in accepted_registration_pairs])
+            np.median([_numeric_float(record.get("residual_px"), float("inf")) for record in accepted_registration_pairs])
         ) if accepted_registration_pairs else float("inf")
         registration_acceptance_fraction = float(
             len(accepted_registration_pairs) / max(len(registration_pairs), 1)
         )
         phase_steps = [
-            float(record.get("phase_step_atlas_px", 0.0))
+            _numeric_float(record.get("phase_step_atlas_px"))
             for record in registration_pairs
-            if float(record.get("phase_step_atlas_px", 0.0)) > 0.0
+            if _numeric_float(record.get("phase_step_atlas_px")) > 0.0
         ]
         phase_median_step = float(np.median(phase_steps)) if phase_steps else 0.0
-        phase_outlier_count = sum(int(record.get("phase_step_outlier", 0)) for record in registration_pairs)
+        phase_outlier_count = sum(
+            1 for record in registration_pairs if _numeric_int(record.get("phase_step_outlier")) == 1
+        )
         phase_backtracking_count = sum(
             int(record.get("reason") == "registration_phase_backtracking") for record in registration_pairs
         )
@@ -1404,10 +1402,10 @@ class ProductSurfaceBuilder:
                 ),
                 "product_surface_registration": registration_records,
                 "product_surface_registration_steps": _vertical_plot(
-                    [float(record.get("step_atlas_px", 0.0)) for record in registration_records]
+                    [_numeric_float(record.get("step_atlas_px")) for record in registration_records]
                 ),
                 "product_surface_phase": _vertical_plot(
-                    [float(record.get("phase_atlas_px", 0.0)) for record in registration_records]
+                    [_numeric_float(record.get("phase_atlas_px")) for record in registration_records]
                 ),
                 "product_surface_registration_gaps": registration_gaps,
                 "product_surface_phase_cells": phase_cells or [],
@@ -1419,7 +1417,7 @@ class ProductSurfaceBuilder:
 
     def _fallback(
         self,
-        baseline_build: _SurfaceBuild,
+        baseline_build: SurfaceBuild,
         measurements: dict[str, float | int | str | list[float] | list[int]],
         artifacts: dict[str, object],
         strips: list[_Strip],
@@ -1509,7 +1507,7 @@ class ProductSurfaceBuilder:
 
 
 def _resize_strip(strip: _Strip, scale: float, output_height: int) -> _Strip:
-    width = max(8, int(round(strip.width * scale)))
+    width = max(8, round(strip.width * scale))
     rejected = (
         cv2.resize(strip.white_mask_rejected, (width, output_height), interpolation=cv2.INTER_NEAREST)
         if strip.white_mask_rejected is not None

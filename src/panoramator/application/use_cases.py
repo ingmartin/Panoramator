@@ -203,7 +203,7 @@ class PanoramaBuilder:
                 continue
             try:
                 image = decode_frame_input(value)
-            except FrameDecodeError as exc:
+            except (FrameDecodeError, TypeError, ValueError) as exc:
                 rejected_inputs.append({"frame_index": index, "reason": "decode_error", "message": str(exc)})
                 _emit_progress(callbacks, "reading", input_count, total)
                 continue
@@ -890,8 +890,8 @@ class PanoramaBuilder:
         self, video_path: str | Path, config: PanoramaConfig
     ) -> tuple[list[SelectedFrame], list[dict[str, object]]]:
         source = OpenCVVideoSource(video_path, config)
-        source.open()
         try:
+            source.open()
             frames = source.iter_frames()
         finally:
             source.close()
@@ -900,8 +900,10 @@ class PanoramaBuilder:
 
     def _read_metadata(self, video_path: str | Path) -> VideoMetadata:
         source = OpenCVVideoSource(video_path, self.config)
-        metadata = source.open()
-        source.close()
+        try:
+            metadata = source.open()
+        finally:
+            source.close()
         return metadata
 
     def _fits_canvas(

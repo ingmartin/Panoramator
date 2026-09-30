@@ -41,8 +41,8 @@ def cylindrical_motion_increment(
     good = [pair[0] for pair in pairs if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance]
     if len(good) < 4:
         return 0.0, 0.0, 0.0, len(good), 0
-    points_previous = np.float32([key_previous[match.queryIdx].pt for match in good])
-    points_current = np.float32([key_current[match.trainIdx].pt for match in good])
+    points_previous = np.asarray([key_previous[match.queryIdx].pt for match in good], dtype=np.float32)
+    points_current = np.asarray([key_current[match.trainIdx].pt for match in good], dtype=np.float32)
     _, inliers = cv2.findHomography(points_previous, points_current, cv2.RANSAC, 5.0)
     if inliers is None:
         return 0.0, 0.0, 0.0, len(good), 0
